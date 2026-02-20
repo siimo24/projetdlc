@@ -242,7 +242,7 @@ void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
 
         /* Clamp to practical range */
         if (params->block_size_t < 5)  params->block_size_t = 5;
-        if (params->block_size_t > 30) params->block_size_t = 30;
+        if (params->block_size_t > 15) params->block_size_t = 15;
     }
 
     int t = params->block_size_t;
@@ -352,6 +352,13 @@ static void expand_block_recursive(
     int depth_in_block,
     int match_count)
 {
+    /* NEW: Prevent massive CPU hang if kp/kq are swapped and the tree explodes.
+     * If we generate way too many candidates in a single block, it means our
+     * equations are not pruning properly (which happens when kp/kq are wrong). */
+    if (*ctx->candidates_generated > ctx->max_candidates * 10) {
+        return;
+    }
+
     int global_pos = ctx->block_start + depth_in_block;
 
     /* ---- Block boundary: threshold check ---- */
@@ -471,8 +478,11 @@ static void expand_block_recursive(
         mpz_clears(cl_p, cl_q, cl_d, cl_dp, cl_dq, NULL);
 
         /* Early exit if output is full */
-        if (ctx->output->count >= ctx->max_candidates)
+        /* Early exit if output is full or safety limit reached */
+        if (ctx->output->count >= ctx->max_candidates ||
+            *ctx->candidates_generated > ctx->max_candidates * 10) {
             return;
+        }
     }
 }
 
@@ -574,9 +584,12 @@ static int hmm_run_once(const degraded_key_t *dk,
         hmm_expand_ctx_t ctx;
         ctx.N = &dk->key.N;
         ctx.e = &dk->key.e;
-        ctx.k = &k;
-        ctx.kp = &kp;
-        ctx.kq = &kq;
+
+        /* FIX: Cast the decayed pointers correctly to pass the heap arrays */
+        ctx.k = (const mpz_t *)k;
+        ctx.kp = (const mpz_t *)kp;
+        ctx.kq = (const mpz_t *)kq;
+
         ctx.tau_k = tau_k;
         ctx.tau_kp = tau_kp;
         ctx.tau_kq = tau_kq;
@@ -588,6 +601,7 @@ static int hmm_run_once(const degraded_key_t *dk,
         ctx.deg_dq = &dk->key.dq;
         ctx.block_start = block_start;
         ctx.block_size = t;
+
         /* Adjust threshold for last block if it's shorter */
         int effective_t = t;
         if (block_start + t > half_bits)
