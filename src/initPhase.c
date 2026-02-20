@@ -273,6 +273,19 @@ int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
  *  Then kp = √B + A mod e,  kq = −√B + A mod e.
  * ======================================================================== */
 
+/* ========================================================================
+ * Step 3b: Solve quadratic for kp, kq
+ *
+ * Equation: kp² − [k(N−1)+1]·kp − k ≡ 0 (mod e)
+ *
+ * Complete the square:
+ * Let A = [k(N−1) + 1 + e] / 2   (mod e)
+ * Then: (kp − A)² ≡ A² + k       (mod e)
+ *
+ * So B = A² + k mod e, and we need √B mod e.
+ * Then kp = √B + A mod e,  kq = −√B + A mod e.
+ * ======================================================================== */
+
 int solve_kp_kq(const mpz_t N, const mpz_t e, const mpz_t k,
                 mpz_t kp, mpz_t kq)
 {
@@ -283,7 +296,13 @@ int solve_kp_kq(const mpz_t N, const mpz_t e, const mpz_t k,
     mpz_sub_ui(A, N, 1);       /* A = N − 1          */
     mpz_mul(A, A, k);          /* A = k·(N−1)        */
     mpz_add_ui(A, A, 1);       /* A = k·(N−1) + 1    */
-    mpz_add(A, A, e);          /* A = k·(N−1) + 1 + e */
+
+    /* FIX: Make A even before exact division by 2 */
+    /* Since e is odd, adding e to an odd A makes it even. */
+    if (mpz_odd_p(A)) {
+        mpz_add(A, A, e);
+    }
+
     mpz_divexact_ui(A, A, 2);  /* A = [...] / 2      */
     mpz_mod(A, A, e);          /* A = A mod e        */
 
