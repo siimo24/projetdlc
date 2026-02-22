@@ -1,0 +1,2 @@
+fraction_known=1.000000
+error_rate=0.200000

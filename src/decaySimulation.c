@@ -1,31 +1,5 @@
 #include "decay_sim.h"
 
-/* ========================================================================
- *  decay_sim.c — DRAM Remanence Decay Simulation
- *
- *  Realistic model based on Halderman et al. (HSH08) experimental data:
- *
- *  Key observations from the paper:
- *   - Memory cells have a "ground state" (preferred value after power loss)
- *   - Ground states alternate in blocks across memory
- *   - Bits opposing ground state flip to ground state with probability δ₀
- *   - Bits matching ground state flip away with tiny probability δ₁ ≈ 0.001
- *   - δ₀ follows a logistic curve as a function of time
- *   - Temperature dramatically affects decay rate:
- *       Room temp (~25°C):   full decay in ~2.5–35 seconds
- *       Cooled (~-50°C):     < 0.001% error after 60 seconds
- *       LN₂ (~-196°C):      0.17% error after 60 minutes
- *
- *  Erasure view (for HS09):
- *   - Attacker detects ground state direction per region
- *   - Bits opposing ground state in degraded image → KNOWN (almost certainly original)
- *   - Bits matching ground state → UNKNOWN (could be original or decayed)
- *
- *  Error view (for HMM10):
- *   - All bits present, but some have wrong values
- *   - Error rate ≈ 0.5 * δ₀  (half the bits oppose ground state, fraction δ₀ flipped)
- * ======================================================================== */
-
 /* ---- Random number generation (simple LCG for portability) ---- */
 
 static unsigned long rng_state;
@@ -34,7 +8,7 @@ static void rng_seed(unsigned long seed) {
     rng_state = seed ? seed : (unsigned long)time(NULL);
 }
 
-/* Returns uniform random in [0, 1) */
+// entier uniforme dans 0,1
 static double rng_uniform(void) {
     /* xorshift64 — fast and reasonable quality */
     rng_state ^= rng_state << 13;
@@ -43,38 +17,27 @@ static double rng_uniform(void) {
     return (double)(rng_state & 0x7FFFFFFFFFFFFFFF) / (double)0x7FFFFFFFFFFFFFFF;
 }
 
-/* Returns true with given probability */
+//on aura besoin du bernoulli pour décider si on va dégrader un  bit ou pas
 static bool rng_bernoulli(double p) {
     return rng_uniform() < p;
 }
 
-/* ---- Logistic decay model ---- */
-
-/*
- * Logistic model parameters fitted to HSH08 experimental data.
- *
- * The decay probability (fraction of anti-ground-state bits that flip)
- * follows: δ₀(t) = 1 / (1 + exp(-k * (t - t_mid)))
- *
- * Parameters per temperature regime:
+/* Modélsiation du modèle de dégradation selon le papier :
  *                    k (rate)     t_mid (seconds)
  *   Room (25°C):     0.5          10
  *   Cold (-50°C):    0.01         600
- *   LN₂ (-196°C):   0.0003       36000
- *
- * These are approximate fits to the paper's experimental curves.
+ *   Azote liquide (-196°C):   0.0003       36000
  */
 
 void decay_params_preset(decay_params_t *params, const char *preset) {
     memset(params, 0, sizeof(*params));
 
-    /* Defaults for all presets */
-    params->wrong_dir_prob = 0.001;         /* δ₁: wrong-direction flip rate */
-    params->ground_state_block_size = 256;  /* Alternating block size (bits) */
+    params->wrong_dir_prob = 0.001;         // delta1
+    params->ground_state_block_size = 256;  // taille du bloc ayant un ground identique
     params->random_ground_start = true;
-    params->seed = 0;                       /* 0 = use current time */
+    params->seed = 0;                       // 0 donc on utilise time
 
-    if (strcmp(preset, "room") == 0) {
+    if (strcmp(preset, "room") == 0) { // on verifie en fct de ce qui a été donné dans les flags
         params->temperature_celsius = 25.0;
         params->time_seconds = 10.0;
         params->decay_rate_k = 0.5;
@@ -93,7 +56,7 @@ void decay_params_preset(decay_params_t *params, const char *preset) {
         params->decay_midpoint = 36000.0;
     }
     else {
-        /* "custom" — zeroed for manual configuration */
+        // autre que les cas classiques, ils sont passés via les flags
         params->temperature_celsius = 25.0;
         params->time_seconds = 0.0;
         params->decay_rate_k = 0.5;
@@ -111,6 +74,8 @@ double compute_decay_probability(const decay_params_t *params) {
     return 1.0 / (1.0 + exp(exponent));
 }
 
+
+// résultats de la simulation de dégradation
 void decay_params_print(const decay_params_t *params) {
     double decay_prob = compute_decay_probability(params);
 
@@ -129,13 +94,7 @@ void decay_params_print(const decay_params_t *params) {
     printf("========================\n");
 }
 
-/* ---- Ground state assignment ---- */
-
-/*
- * Determine ground state for a given bit position.
- * Simulates alternating blocks of ground_state = 0 and ground_state = 1.
- * The first block's polarity is determined randomly if random_ground_start is set.
- */
+// on décide de l'état ground à donner à un bit
 static int ground_state_for_bit(int bit_index, int block_size, int first_block_polarity) {
     int block_num = bit_index / block_size;
     return (block_num + first_block_polarity) % 2;
@@ -144,20 +103,14 @@ static int ground_state_for_bit(int bit_index, int block_size, int first_block_p
 /* ---- Core decay function for a single component ---- */
 
 /*
- * Degrade a single GMP number and produce known-bits array.
- *
- * @param original        Original correct value
- * @param degraded        Output: degraded value (with flipped bits)
- * @param known_bits      Output: known-bits array (-1=unknown, 0/1=known)
- * @param num_bits        Number of bits in this component
- * @param decay_prob      Probability of anti-ground-state bit flipping (δ₀)
- * @param wrong_dir_prob  Probability of ground-state bit flipping (δ₁)
- * @param block_size      Ground state alternating block size
- * @param first_polarity  Polarity of the first ground state block
- * @param bit_offset      Offset for ground state calculation (to vary per component)
- * @param stats_flipped   Output: count of bits that were flipped
- * @param stats_known     Output: count of bits marked as known
+ * decay_prob      delta0
+ * wrong_dir_prob  delta1
+ * bit_offset      offset pour le calul du ground
  */
+
+// la dégradation pour un seul nombre gmp se fait ici, decay_prob correspond à la proba
+// qu'un 1 devienne 0, et wrong dir à ce qu'un bit 0 devienne 1
+
 static void degrade_component(
     const mpz_t original, mpz_t degraded, int *known_bits, int num_bits,
     double decay_prob, double wrong_dir_prob,
@@ -174,46 +127,36 @@ static void degrade_component(
         int degraded_bit = orig_bit;
 
         if (orig_bit != gs) {
-            /* Bit opposes ground state → flip to ground state with probability δ₀ */
+            // si le bit != gnd, on le flippe avec une proba delta0 (qu'un 1 devienne 0)
             if (rng_bernoulli(decay_prob)) {
                 degraded_bit = gs;
                 (*stats_flipped)++;
             }
         } else {
-            /* Bit matches ground state → wrong-direction flip with probability δ₁ */
+            // si le bit = gnd, on le flippe avec une proba delta1 (qu'un 0 devienne 1)
             if (rng_bernoulli(wrong_dir_prob)) {
                 degraded_bit = 1 - gs;
                 (*stats_flipped)++;
             }
         }
 
-        /* Apply the (possibly flipped) bit */
+        // on applique le bit qu'on a (probablement) flippé
         if (degraded_bit)
             mpz_setbit(degraded, i);
         else
             mpz_clrbit(degraded, i);
 
-        /*
-         * Erasure view (attacker perspective):
-         * The attacker determines the ground state direction for each region.
-         * - If degraded bit OPPOSES ground state → it's almost certainly the
-         *   original value (wrong-direction flips are negligible).
-         *   Mark as KNOWN.
-         * - If degraded bit MATCHES ground state → could be original or decayed.
-         *   Mark as UNKNOWN.
-         */
+      // l'attaquant connait le ground state, il ne peur pas se fier aux bits qui sont égaux au gnd
         if (degraded_bit != gs) {
-            /* Anti-ground-state → known correct */
+            // diff de ground -> forcément correct
             known_bits[i] = degraded_bit;
             (*stats_known)++;
         } else {
-            /* Matches ground state → ambiguous */
+            // égal au ground, on n'est pas trop sûr
             known_bits[i] = BIT_UNKNOWN;
         }
     }
 }
-
-/* ---- Public API ---- */
 
 void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
                  const decay_params_t *params)
@@ -239,14 +182,14 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     int total_flipped = 0, total_known = 0, total_bits = 0;
     int flipped, known;
 
-    /* Each component gets a different bit_offset so ground state patterns
-     * are independent (simulating different memory locations) */
+    // on applique différents offsets pour que les états ground soient indépendants et qu'on parvienne à simuler
+    // des zones mémoires non contigues
     int offsets[5];
     for (int i = 0; i < 5; i++) {
         offsets[i] = (int)(rng_uniform() * 10000);
     }
 
-    /* Degrade p */
+    // degradation de p
     degrade_component(original->p, dk->key.p, dk->known_p, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[0], &flipped, &known);
@@ -254,7 +197,7 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  p:  %d/%d known (%.1f%%), %d flipped\n",
            known, dk->half_bits, 100.0*known/dk->half_bits, flipped);
 
-    /* Degrade q */
+    // pour q
     degrade_component(original->q, dk->key.q, dk->known_q, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[1], &flipped, &known);
@@ -262,7 +205,7 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  q:  %d/%d known (%.1f%%), %d flipped\n",
            known, dk->half_bits, 100.0*known/dk->half_bits, flipped);
 
-    /* Degrade d */
+    // pour d
     degrade_component(original->d, dk->key.d, dk->known_d, dk->full_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[2], &flipped, &known);
@@ -270,7 +213,7 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  d:  %d/%d known (%.1f%%), %d flipped\n",
            known, dk->full_bits, 100.0*known/dk->full_bits, flipped);
 
-    /* Degrade dp */
+    // pour dp
     degrade_component(original->dp, dk->key.dp, dk->known_dp, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[3], &flipped, &known);
@@ -278,7 +221,7 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  dp: %d/%d known (%.1f%%), %d flipped\n",
            known, dk->half_bits, 100.0*known/dk->half_bits, flipped);
 
-    /* Degrade dq */
+    // pour dq
     degrade_component(original->dq, dk->key.dq, dk->known_dq, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[4], &flipped, &known);
@@ -294,7 +237,7 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
            100.0 * dk->error_rate);
 }
 
-/* Helper for simple flat-probability decay */
+// fonction pour dégradation simple
 static void simple_degrade_component(const mpz_t orig, mpz_t deg, int *known, int nbits,
                                      double known_fraction, double error_rate) {
     mpz_set(deg, orig);
