@@ -1,6 +1,5 @@
 #include "decay_sim.h"
 
-/* ---- Random number generation (simple LCG for portability) ---- */
 
 static unsigned long rng_state;
 
@@ -51,7 +50,7 @@ void decay_params_preset(decay_params_t *params, const char *preset) {
     }
     else if (strcmp(preset, "frozen") == 0) {
         params->temperature_celsius = -196.0;
-        params->time_seconds = 3600.0;  /* 60 minutes */
+        params->time_seconds = 3600.0;  // 60 minutes
         params->decay_rate_k = 0.0003;
         params->decay_midpoint = 36000.0;
     }
@@ -100,7 +99,6 @@ static int ground_state_for_bit(int bit_index, int block_size, int first_block_p
     return (block_num + first_block_polarity) % 2;
 }
 
-/* ---- Core decay function for a single component ---- */
 
 /*
  * decay_prob      delta0

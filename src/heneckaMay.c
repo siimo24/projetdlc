@@ -1,29 +1,8 @@
 #include "henecka_may.h"
 #include <time.h>
 
-/* ========================================================================
- *  henecka_may.c — Block-Threshold RSA Key Reconstruction (HMM10)
- *
- *  Unlike HS09 (erasure model, known-bit pruning), HMM10 works in the
- *  error model: ALL bits are present, but a fraction δ may be wrong.
- *
- *  Core idea:
- *   1. Same 4 equations (8)-(11) constrain each bit slice → 2 valid candidates
- *   2. Process bits in blocks of t positions at a time
- *   3. Within a block: expand all 2^t candidate paths (depth-first)
- *   4. At the end of each block: count matching bits against degraded key
- *   5. Keep only candidates where match_count ≥ threshold C
- *
- *  Why this works:
- *   - The correct path agrees with the degraded key at ~5t(1−δ) positions
- *   - Wrong paths (heuristically) agree at ~5t/2 positions (random)
- *   - Threshold C = 5t(1/2 + γ₀) separates these distributions
- *   - γ₀ = √((1 + 1/t) · ln(2) / 10) ≈ 0.263
- *
- *  Expected complexity: O(n²) with high probability for δ < 0.237.
- * ======================================================================== */
 
-/* ---- Candidate data structures ---- */
+// struct d'un candidat donné
 
 typedef struct {
     mpz_t p, q, d, dp, dq;
@@ -45,7 +24,7 @@ static void candidate_copy(hmm_candidate_t *dst, const hmm_candidate_t *src) {
     mpz_set(dst->dq, src->dq);
 }
 
-/* Dynamic candidate list */
+// liste dynamique de candidats + fct utilitaires
 typedef struct {
     hmm_candidate_t *items;
     int count;
@@ -69,7 +48,8 @@ static void list_clear(candidate_list_t *l) {
     l->capacity = 0;
 }
 
-/* Ensure capacity, growing if needed */
+// si la liste est pleine on lui  double la taille avec realloc
+// c'est équivalent au std vector en cpp
 static void list_ensure(candidate_list_t *l, int needed) {
     if (needed <= l->capacity) return;
     int new_cap = l->capacity;
@@ -80,19 +60,18 @@ static void list_ensure(candidate_list_t *l, int needed) {
     l->capacity = new_cap;
 }
 
-/* Add a candidate to the list (copies values) */
+// ajout d'un candidat
 static void list_push(candidate_list_t *l, const hmm_candidate_t *c) {
     list_ensure(l, l->count + 1);
     candidate_copy(&l->items[l->count], c);
     l->count++;
 }
 
-/* Reset count without freeing */
 static void list_reset(candidate_list_t *l) {
     l->count = 0;
 }
 
-/* ---- All 32 slice possibilities ---- */
+// liste statique qui permettra des comparaisons rapides
 
 static const char POSSIBILITIES[32][5] = {
     {0,0,0,0,0}, {0,0,0,0,1}, {0,0,0,1,0}, {0,0,0,1,1},
