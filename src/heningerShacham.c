@@ -2,30 +2,9 @@
 #include "heninger_shacham.h"
 #include <time.h>
 
-/* ========================================================================
- *  heninger_shacham.c — Branch & Prune RSA Key Reconstruction
- *
- *  ITERATIVE implementation using explicit candidate lists.
- *  (The recursive DFS approach caused stack overflow when kp/kq are wrong,
- *  because wrong kp/kq breaks equations (10)-(11) pruning, causing the
- *  search tree to explode.)
- *
- *  From HS09 paper, equations (8)-(11):
- *
- *  At bit position i, with current partial values p0, q0, d0, dp0, dq0,
- *  and candidate bits p_i, q_i, d_i, dp_i, dq_i:
- *
- *  (8)  bit_i(N - p0*q0)                          = p_i XOR q_i
- *  (9)  bit_{i+t(k)}(k(N+1) - k(p0+q0) - e*d0 + 1) = d_i XOR p_i XOR q_i
- *  (10) bit_{i+t(kp)}(kp(p0-1) + 1 - e*dp0)      = dp_i XOR p_i
- *  (11) bit_{i+t(kq)}(kq(q0-1) + 1 - e*dq0)      = dq_i XOR q_i
- *
- *  These 4 equations on 5 unknowns yield exactly 2 valid candidates
- *  per slice. Known bits further reduce this to <= 2, often to 1.
- * ======================================================================== */
 
-/* --- Result init/clear --- */
 
+// Initialisation et suivi des Résultats
 void hs_result_init(hs_result_t *res) {
     rsa_key_init(&res->recovered_key);
     res->success = false;
@@ -55,7 +34,7 @@ void hs_result_print(const hs_result_t *res) {
     printf("================================\n");
 }
 
-/* ---- All 32 possibilities for a 5-bit slice ---- */
+// Les 32 possibilités pour les 5 variables correspondent aux bits pi, qi, di, dpi et dqi
 static const char POSSIBILITIES[32][5] = {
     {0,0,0,0,0}, {0,0,0,0,1}, {0,0,0,1,0}, {0,0,0,1,1},
     {0,0,1,0,0}, {0,0,1,0,1}, {0,0,1,1,0}, {0,0,1,1,1},
@@ -67,7 +46,7 @@ static const char POSSIBILITIES[32][5] = {
     {1,1,1,0,0}, {1,1,1,0,1}, {1,1,1,1,0}, {1,1,1,1,1}
 };
 
-/* ---- Candidate management ---- */
+// Gestion dynamique des candidats en mémoire
 
 typedef struct {
     mpz_t p, q, d, dp, dq;
@@ -133,7 +112,7 @@ static void clist_reset(hs_clist_t *cl) {
     cl->count = 0;
 }
 
-/* ---- Equation checks ---- */
+// Filtre mathématique (à partir de l'article HS09)
 
 static bool check_eq8(const mpz_t N, const mpz_t p0, const mpz_t q0,
                       char p_i, char q_i, int i)
@@ -206,7 +185,7 @@ static bool check_eq11(const mpz_t e, const mpz_t kq, int tau_kq,
     return ok;
 }
 
-/* ---- Termination check ---- */
+// Test initial pour deviner le reste des nombres $p$ et $q$
 
 static bool try_termination(const mpz_t e, const mpz_t kp, const mpz_t kq,
                             const mpz_t N, const mpz_t dp0, const mpz_t dq0,
@@ -245,20 +224,7 @@ static bool try_termination(const mpz_t e, const mpz_t kp, const mpz_t kq,
     return found;
 }
 
-/* ========================================================================
- *  Iterative Branch & Prune
- *
- *  BFS with two candidate lists (current / next).
- *  At each bit position:
- *    1. Check termination on all current candidates
- *    2. For each candidate, test 32 slices through equations (8)-(11)
- *    3. Prune with known bits
- *    4. Add survivors to next list
- *    5. Swap current <-> next
- *
- *  Safety: if candidate count exceeds MAX_CANDIDATES, the attempt is
- *  aborted (wrong kp/kq assignment causes runaway growth).
- * ======================================================================== */
+// Moteur de recherche - Parcours en Largeur
 
 #define HS_MAX_CANDIDATES 100000
 
@@ -270,7 +236,7 @@ static int hs_run_once(const degraded_key_t *dk,
 {
     int half_bits = dk->half_bits;
 
-    /* Build initial candidate */
+    //candidat initial
     hs_candidate_t seed;
     cand_init(&seed);
     mpz_set_ui(seed.p, 0);  mpz_setbit(seed.p, 0);
@@ -317,7 +283,7 @@ static int hs_run_once(const degraded_key_t *dk,
                    depth, half_bits, current.count, result->branches_explored);
         }
 
-        /* Check termination */
+        // Vérification
         mpz_t cp, cq;
         mpz_inits(cp, cq, NULL);
         for (int c = 0; c < current.count; c++) {
@@ -351,7 +317,7 @@ static int hs_run_once(const degraded_key_t *dk,
         }
         mpz_clears(cp, cq, NULL);
 
-        /* Expand candidates */
+        
         clist_reset(&next);
 
         for (int c = 0; c < current.count; c++) {
@@ -387,7 +353,7 @@ static int hs_run_once(const degraded_key_t *dk,
                     continue;
                 }
 
-                /* Check known bits */
+                // Vérifier les bits connus
                 bool ok = true;
 
                 if (kn_p[depth] != BIT_UNKNOWN && kn_p[depth] != p_i)
@@ -416,7 +382,7 @@ static int hs_run_once(const degraded_key_t *dk,
                     continue;
                 }
 
-                /* Valid - create child */
+                // validation
                 hs_candidate_t child;
                 cand_init(&child);
                 cand_copy(&child, cand);
@@ -430,7 +396,6 @@ static int hs_run_once(const degraded_key_t *dk,
             }
         }
 
-        /* Safety: abort if tree explodes (wrong kp/kq) */
         if (next.count > HS_MAX_CANDIDATES) {
             if (verbose) {
                 printf("  [HS] Candidates exploded to %d at depth %d - "
@@ -450,14 +415,12 @@ static int hs_run_once(const degraded_key_t *dk,
             return -1;
         }
 
-        /* Swap */
         hs_clist_t tmp = current;
         current = next;
         next = tmp;
         clist_reset(&next);
     }
 
-    /* Final termination check */
     mpz_t fp, fq;
     mpz_inits(fp, fq, NULL);
     for (int c = 0; c < current.count; c++) {
@@ -492,7 +455,7 @@ static int hs_run_once(const degraded_key_t *dk,
     return result->success ? 0 : -1;
 }
 
-/* ---- Public entry point ---- */
+// point d'entrée principale
 
 int run_heninger_shacham(const degraded_key_t *dk,
                          const init_result_t *init,
@@ -505,7 +468,7 @@ int run_heninger_shacham(const degraded_key_t *dk,
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    /* Attempt 1: kp, kq as given */
+    // Tentative 1 : avec kp et kq tels quels
     gmp_printf("[HS] Attempt 1: kp=%Zd, kq=%Zd\n", init->kp, init->kq);
     printf("[HS] tau(k)=%d, tau(kp)=%d, tau(kq)=%d\n\n",
            init->tau_k, init->tau_kp, init->tau_kq);
@@ -523,7 +486,7 @@ int run_heninger_shacham(const degraded_key_t *dk,
         return 0;
     }
 
-    /* Attempt 2: swap kp and kq */
+    // Tentative 2 : Si échec, inversion de kp et kq
     if (try_swap) {
         printf("\n[HS] Attempt 1 failed (%lld branches explored).\n",
                result->branches_explored);
