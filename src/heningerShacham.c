@@ -113,8 +113,8 @@ static void clist_reset(hs_clist_t *cl) {
 }
 
 // Filtre mathématique (à partir de l'article HS09)
-
-static bool doesNEqualpq(const mpz_t N, const mpz_t p0, const mpz_t q0, //eq8
+// eq8 : Vérifie que N - (p*q) est cohérent au bit i
+static bool doesNEqualpq(const mpz_t N, const mpz_t p0, const mpz_t q0, 
                       char p_i, char q_i, int i)
 {
     mpz_t term;
@@ -126,7 +126,8 @@ static bool doesNEqualpq(const mpz_t N, const mpz_t p0, const mpz_t q0, //eq8
     return ok;
 }
 
-static bool eTimesd(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,  //eq9
+// eq 9 :  Vérifie la relation entre l'exposant public e et l'exposant privé d
+static bool eTimesd(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,  
                       const mpz_t p0, const mpz_t q0, const mpz_t d0,
                       char p_i, char q_i, char d_i, int i)
 {
@@ -149,7 +150,8 @@ static bool eTimesd(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,  //e
     return ok;
 }
 
-static bool eTimesdp(const mpz_t e, const mpz_t kp, int tau_kp,  //eq10
+// eq10 : Relation spécifique au mode CRT pour le facteur p (utilise kp)
+static bool eTimesdp(const mpz_t e, const mpz_t kp, int tau_kp, 
                        const mpz_t p0, const mpz_t dp0,
                        char p_i, char dp_i, int i)
 {
@@ -167,7 +169,8 @@ static bool eTimesdp(const mpz_t e, const mpz_t kp, int tau_kp,  //eq10
     return ok;
 }
 
-static bool eTimesdq(const mpz_t e, const mpz_t kq, int tau_kq,  // //eq11
+// eq11 : Relation spécifique au mode CRT pour le facteur q (utilise kq)
+static bool eTimesdq(const mpz_t e, const mpz_t kq, int tau_kq, 
                        const mpz_t q0, const mpz_t dq0,
                        char q_i, char dq_i, int i)
 {
@@ -186,7 +189,7 @@ static bool eTimesdq(const mpz_t e, const mpz_t kq, int tau_kq,  // //eq11
 }
 
 // Test initial pour deviner le reste des nombres p et q
-
+// Formule : p = ((e * dp - 1) / kp) + 1
 static bool verify_success(const mpz_t e, const mpz_t kp, const mpz_t kq,
                             const mpz_t N, const mpz_t dp0, const mpz_t dq0,
                             mpz_t out_p, mpz_t out_q)
