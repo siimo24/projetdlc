@@ -9,22 +9,24 @@
 #include <sys/stat.h>
 
 /* ========================================================================
- *  main.c — RSA Key Reconstruction from Degraded Memory
+ * main.c — Recup de clef RSA post Cold-Boot Attack
  *
- *  Phase 1: Key Generation & Decay Simulation
- *  Phase 2: Init Phase — Compute k, kp, kq from degraded key
- *  Phase 3: Heninger-Shacham Branch & Prune Reconstruction
- *  Phase 4: Henecka-May-Meurer Block Threshold Reconstruction
+ * déroulement:
+ * Phase 1: Gen de clef & Simu de la RAM qui freeze (decay)
+ * Phase 2: Init — calcul des k, kp, kq depuis la clef pétée
+ * Phase 3: Attaque Heninger-Shacham (HS09) -> rapide mais sensible au bruit
+ * Phase 4: Attaque Henecka-May-Meurer (HMM10) -> stat thresholding
  *
- *  Usage:
- *    ./rsa_recon --bits 1024 --preset cold --time 120
- *    ./rsa_recon --bits 512 --preset room --time 8
- *    ./rsa_recon --bits 1024 --simple --known 0.30 --error 0.0
- *    ./rsa_recon --import keys/original_key.txt --preset frozen --time 3600
+ * flags importants pour les tests
+ * ./rsa_recon --bits 1024 --preset cold --time 120
+ * ./rsa_recon --bits 512 --preset room --time 8
+ * ./rsa_recon --bits 1024 --simple --known 0.30 --error 0.0
+ * ./rsa_recon --import keys/original_key.txt --preset frozen --time 3600
  * ======================================================================== */
 
-/* --- Bit-level comparison helpers --- */
+// --- Helpers pour sortir des stats de debug ---
 
+// compte cb de bits ont flip
 static void compare_bits(const char *name, const mpz_t orig, const mpz_t deg, int nbits) {
     int differ = 0;
     for (int i = 0; i < nbits; i++) {
@@ -35,6 +37,7 @@ static void compare_bits(const char *name, const mpz_t orig, const mpz_t deg, in
            name, differ, nbits, 100.0 * differ / nbits);
 }
 
+// check si les bits marqués "connus" sont pas des mythos
 static void check_known_accuracy(const char *name, const mpz_t orig, const int *known, int nbits) {
     int total_known = 0, correct = 0;
     for (int i = 0; i < nbits; i++) {
@@ -50,6 +53,7 @@ static void check_known_accuracy(const char *name, const mpz_t orig, const int *
     }
 }
 
+// affichage de l'aide CLI
 static void print_usage(const char *prog) {
     printf("Usage: %s [OPTIONS]\n\n", prog);
     printf("Key generation:\n");
@@ -74,7 +78,7 @@ static void print_usage(const char *prog) {
 }
 
 int main(int argc, char *argv[]) {
-    /* Default configuration */
+    // config par defaut
     int key_bits = 1024;
     unsigned long pub_exp = 65537;
     char *import_file = NULL;
@@ -90,7 +94,7 @@ int main(int argc, char *argv[]) {
     int block_size = 256;
     unsigned long seed = 0;
 
-    /* Parse command line arguments */
+    // parsing des args facon linux
     static struct option long_opts[] = {
         {"bits",       required_argument, NULL, 'b'},
         {"exp",        required_argument, NULL, 'E'},
@@ -132,70 +136,71 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Create output directory */
     mkdir(outdir, 0755);
 
     printf("╔══════════════════════════════════════════════════════════╗\n");
-    printf("║   RSA Key Reconstruction — Cold Boot Attack Simulator   ║\n");
+    printf("║   RSA Key Reconstruction — Cold Boot Attack Simulator    ║\n");
     printf("╚══════════════════════════════════════════════════════════╝\n\n");
 
-    /* ---- Step 1: Get an RSA key ---- */
+    // --- Etape 1: La clef cible ---
+    // soit on la charge depuis un fichier, soit on en pond une nouvelle toute belle
     rsa_key_t original;
     rsa_key_init(&original);
 
     if (import_file) {
-        printf("[STEP 1] Importing key from %s\n", import_file);
+        printf("[STEP 1] Import clef cible depuis %s\n", import_file);
         if (rsa_key_import(&original, import_file) != 0) {
-            fprintf(stderr, "Error: Failed to import key\n");
+            fprintf(stderr, "Erreur: echec import\n");
             return 1;
         }
         key_bits = original.bits;
     } else {
-        printf("[STEP 1] Generating %d-bit RSA key (e = %lu)\n", key_bits, pub_exp);
+        printf("[STEP 1] Generation clef RSA %d-bit (e = %lu)\n", key_bits, pub_exp);
         if (rsa_keygen(&original, key_bits, pub_exp) != 0) {
-            fprintf(stderr, "Error: Key generation failed\n");
+            fprintf(stderr, "Erreur: pb pdt la generation de la clef\n");
             return 1;
         }
     }
 
-    /* Verify the key */
+    // ptit check de sante
     if (rsa_key_verify(&original)) {
-        printf("[STEP 1] Key verification: OK ✓\n");
+        printf("[STEP 1] Verif clef: OK ✓\n");
     } else {
-        fprintf(stderr, "[STEP 1] Key verification: FAILED ✗\n");
+        fprintf(stderr, "[STEP 1] Verif clef: FAILED ✗\n");
         rsa_key_clear(&original);
         return 1;
     }
 
     if (verbose) {
-        rsa_key_print_summary(&original, "Original Key");
+        rsa_key_print_summary(&original, "Clef Originale");
     }
 
-    /* Export original key */
+    // backup de la clef propre pour comparer apres
     char path[512];
     snprintf(path, sizeof(path), "%s/original_key.txt", outdir);
     rsa_key_export(&original, path);
-    printf("[STEP 1] Original key saved to %s\n\n", path);
+    printf("[STEP 1] Clef originale sauvée ds %s\n\n", path);
 
-    /* ---- Step 2: Apply decay ---- */
+    // --- Etape 2: On pète la RAM ---
+    // application du decay physique (courbe logistique)
     degraded_key_t dk;
     degraded_key_init(&dk, key_bits);
 
     if (use_simple) {
-        printf("[STEP 2] Applying simple decay (known=%.2f, error=%.4f)\n", simple_known, simple_error);
+        printf("[STEP 2] Decay mode simple (known=%.2f, error=%.4f)\n", simple_known, simple_error);
         apply_simple_decay(&original, &dk, simple_known, simple_error, seed);
     } else {
         decay_params_t params;
         decay_params_preset(&params, preset);
 
-        /* Apply any custom overrides */
+        // overrides si besoin
         if (custom_time >= 0)    params.time_seconds = custom_time;
         if (custom_temp > -998)  params.temperature_celsius = custom_temp;
         if (custom_wrong_dir >= 0) params.wrong_dir_prob = custom_wrong_dir;
         params.ground_state_block_size = block_size;
         params.seed = seed;
 
-        printf("[STEP 2] Applying DRAM decay simulation\n");
+        printf("[STEP 2] Lancement simu physique DRAM\n");
         decay_params_print(&params);
         printf("\n");
 
@@ -205,16 +210,16 @@ int main(int argc, char *argv[]) {
     printf("\n");
     degraded_key_print_stats(&dk);
 
-    /* Export degraded key */
-    printf("\n[STEP 2] Exporting degraded key to %s/\n", outdir);
+    // on dump la clef petée (ce que l'attaquant recupere en vrai)
+    printf("\n[STEP 2] Export clef petée vers %s/\n", outdir);
     degraded_key_export(&dk, outdir);
 
     if (verbose) {
-        rsa_key_print_summary(&dk.key, "Degraded Key");
+        rsa_key_print_summary(&dk.key, "Clef Degradee");
     }
 
-    /* ---- Step 3: Compare original vs degraded (bit-level analysis) ---- */
-    printf("\n[STEP 3] Bit-level comparison (original vs degraded)\n");
+    // --- Etape 3: Verif des stats ---
+    printf("\n[STEP 3] Check des degats (original vs degrade)\n");
 
     compare_bits("p",  original.p,  dk.key.p,  dk.half_bits);
     compare_bits("q",  original.q,  dk.key.q,  dk.half_bits);
@@ -222,8 +227,7 @@ int main(int argc, char *argv[]) {
     compare_bits("dp", original.dp, dk.key.dp, dk.half_bits);
     compare_bits("dq", original.dq, dk.key.dq, dk.half_bits);
 
-    /* ---- Verify that known bits are actually correct ---- */
-    printf("\n[STEP 3] Known-bit accuracy check\n");
+    printf("\n[STEP 3] Check si nos bits 'connus' sont legits\n");
 
     check_known_accuracy("p",  original.p,  dk.known_p,  dk.half_bits);
     check_known_accuracy("q",  original.q,  dk.known_q,  dk.half_bits);
@@ -231,48 +235,48 @@ int main(int argc, char *argv[]) {
     check_known_accuracy("dp", original.dp, dk.known_dp, dk.half_bits);
     check_known_accuracy("dq", original.dq, dk.known_dq, dk.half_bits);
 
-    printf("\n[DONE] Phase 1 & 2 complete. Files in %s/\n", outdir);
-    printf("  original_key.txt    — Original RSA-CRT key\n");
-    printf("  degraded_key.txt    — Degraded key values\n");
-    printf("  known_bits_*.txt    — Known bit positions per component\n");
-    printf("  decay_stats.txt     — Decay statistics\n");
+    printf("\n[DONE] Phase 1 & 2 terminees. Fichiers ds %s/\n", outdir);
+    printf("  original_key.txt    — Clef d'origine\n");
+    printf("  degraded_key.txt    — Clef post-freeze\n");
+    printf("  known_bits_*.txt    — Arrays des bits qui ont survecus\n");
+    printf("  decay_stats.txt     — Stats du decay\n");
 
-    /* ---- Step 4: Init Phase — Compute k, kp, kq ---- */
+    // --- Etape 4: Init ---
+    // faut recup les variables mathematiques avant de lancer la reconstruction
     printf("\n");
     init_result_t init_res;
     init_result_init(&init_res);
 
     if (run_init_phase(&dk, &init_res, verbose) != 0) {
-        fprintf(stderr, "[STEP 4] Init phase FAILED\n");
+        fprintf(stderr, "[STEP 4] Crash phase d'init\n");
         init_result_clear(&init_res);
         rsa_key_clear(&original);
         degraded_key_clear(&dk);
         return 1;
     }
 
-    /* Verify against original key (since we have it — for testing purposes) */
-    printf("\n[STEP 4] Verifying init results against original key ...\n");
+    printf("\n[STEP 4] Verif de l'init avec la vrai clef (cheat de dev)...\n");
     if (verify_init_result(&original, &init_res)) {
-        printf("[STEP 4] Init phase verification: ALL OK ✓\n");
+        printf("[STEP 4] Verif init: TOUT EST BON ✓\n");
     } else {
-        printf("[STEP 4] Init phase verification: SOME CHECKS FAILED ✗\n");
-        printf("  (This may happen with high decay — k detection can fail)\n");
+        printf("[STEP 4] Verif init: Y'A DES PB ✗\n");
+        printf("  (Normal si la memoire est trop détruite)\n");
     }
 
-    printf("\n[DONE] Ready for Phase 3: Branch & Prune reconstruction.\n");
+    printf("\n[DONE] Go pour la phase 3: Reconstruction.\n");
 
-    /* ---- Step 5: Heninger-Shacham Branch & Prune ---- */
+    // --- Etape 5: Tentative via Heninger-Shacham (HS09) ---
+    // parfait si ya des bits effacés mais 0 erreurs.
     printf("\n");
     hs_result_t hs_res;
     hs_result_init(&hs_res);
 
     int hs_ret = run_heninger_shacham(&dk, &init_res, &hs_res,
-                                       true,  /* try_swap */
+                                       true,  /* try_swap (astuce kp/kq) */
                                        verbose);
 
     if (hs_ret == 0) {
-        /* Verify recovered key against original */
-        printf("\n[STEP 5] Verifying recovered key ...\n");
+        printf("\n[STEP 5] Verif clef recuperée par HS09...\n");
 
         bool p_ok = (mpz_cmp(hs_res.recovered_key.p, original.p) == 0 ||
                      mpz_cmp(hs_res.recovered_key.p, original.q) == 0);
@@ -285,29 +289,29 @@ int main(int argc, char *argv[]) {
         printf("  d match:  %s\n", d_ok ? "OK ✓" : "MISMATCH ✗");
 
         if (rsa_key_verify(&hs_res.recovered_key)) {
-            printf("  Full key verification: OK ✓\n");
+            printf("  Verif crypto complete: OK ✓\n");
         } else {
-            printf("  Full key verification: FAILED ✗\n");
+            printf("  Verif crypto complete: FAILED ✗\n");
         }
 
-        /* Export recovered key */
         char rpath[512];
         snprintf(rpath, sizeof(rpath), "%s/recovered_key.txt", outdir);
         rsa_key_export(&hs_res.recovered_key, rpath);
-        printf("\n[STEP 5] Recovered key saved to %s\n", rpath);
+        printf("\n[STEP 5] Clef recupérée sauvée dans %s\n", rpath);
 
         if (verbose) {
-            rsa_key_print_summary(&hs_res.recovered_key, "Recovered Key");
+            rsa_key_print_summary(&hs_res.recovered_key, "Clef Recup HS");
         }
     } else {
-        printf("\n[STEP 5] HS Reconstruction FAILED — key not recovered.\n");
+        printf("\n[STEP 5] HS a fail — Il y a surement des bits inversés par erreur thermique.\n");
     }
 
-    /* ---- Step 6: Henecka-May-Meurer Block Threshold ---- */
+    // --- Etape 6: Tentative via Henecka-May-Meurer (HMM10) ---
+    // si HS a fail, on sort l'artillerie statistique lourde pour absorber les erreurs.
     printf("\n");
     hmm_params_t hmm_params;
     hmm_params_default(&hmm_params);
-    hmm_params_auto(&hmm_params, key_bits, dk.error_rate);
+    hmm_params_auto(&hmm_params, key_bits, dk.error_rate); // calcul auto du seuil
 
     hmm_result_t hmm_res;
     hmm_result_init(&hmm_res);
@@ -317,7 +321,7 @@ int main(int argc, char *argv[]) {
                                    verbose);
 
     if (hmm_ret == 0) {
-        printf("\n[STEP 6] Verifying HMM recovered key ...\n");
+        printf("\n[STEP 6] Verif clef recuperee par HMM10...\n");
 
         bool p_ok = (mpz_cmp(hmm_res.recovered_key.p, original.p) == 0 ||
                      mpz_cmp(hmm_res.recovered_key.p, original.q) == 0);
@@ -328,44 +332,46 @@ int main(int argc, char *argv[]) {
         printf("  q match:  %s\n", q_ok ? "OK ✓" : "MISMATCH ✗");
 
         if (rsa_key_verify(&hmm_res.recovered_key)) {
-            printf("  Full key verification: OK ✓\n");
+            printf("  Verif crypto complete: OK ✓\n");
         } else {
-            printf("  Full key verification: FAILED ✗\n");
+            printf("  Verif crypto complete: FAILED ✗\n");
         }
 
         char hpath[512];
         snprintf(hpath, sizeof(hpath), "%s/recovered_key_hmm.txt", outdir);
         rsa_key_export(&hmm_res.recovered_key, hpath);
-        printf("\n[STEP 6] HMM recovered key saved to %s\n", hpath);
+        printf("\n[STEP 6] Clef recupérée HMM sauvée ds %s\n", hpath);
     } else {
-        printf("\n[STEP 6] HMM Reconstruction FAILED — key not recovered.\n");
+        printf("\n[STEP 6] HMM a fail aussi — la memoire est surement trop detruite.\n");
     }
 
-    /* ---- Final Summary ---- */
+    // --- Fin: Recap global ---
     printf("\n╔══════════════════════════════════════════════════╗\n");
-    printf("║                  Summary                          ║\n");
+    printf("║                  Bilan du run                    ║\n");
     printf("╚══════════════════════════════════════════════════╝\n");
-    printf("  Key size:              %d bits\n", key_bits);
-    printf("  Known bit fraction:    %.4f (%.1f%%)\n",
+    printf("  Taille clef:           %d bits\n", key_bits);
+    printf("  Fraction de bits ok:   %.4f (%.1f%%)\n",
            dk.fraction_known, dk.fraction_known * 100.0);
-    printf("  Error rate:            %.4f (%.1f%%)\n",
+    printf("  Tx d'erreur:           %.4f (%.1f%%)\n",
            dk.error_rate, dk.error_rate * 100.0);
-    printf("\n  Heninger-Shacham (erasure model):\n");
-    printf("    Result:              %s\n", hs_ret == 0 ? "SUCCESS" : "FAILED");
-    if (hs_ret == 0) {
-        printf("    Time:                %.3f s\n", hs_res.elapsed_seconds);
-        printf("    Branches explored:   %lld\n", hs_res.branches_explored);
-    }
-    printf("\n  Henecka-May-Meurer (error model):\n");
-    printf("    Result:              %s\n", hmm_ret == 0 ? "SUCCESS" : "FAILED");
-    if (hmm_ret == 0) {
-        printf("    Time:                %.3f s\n", hmm_res.elapsed_seconds);
-        printf("    Candidates tested:   %lld\n", hmm_res.total_candidates_generated);
-    }
-    printf("    Block size (t):      %d\n", hmm_params.block_size_t);
-    printf("    Threshold (C):       %d\n", hmm_params.threshold_C);
 
-    /* Cleanup */
+    printf("\n  Heninger-Shacham (algo pur effacements):\n");
+    printf("    Resultat:            %s\n", hs_ret == 0 ? "SUCCESS" : "FAILED");
+    if (hs_ret == 0) {
+        printf("    Temps d'exec:        %.3f s\n", hs_res.elapsed_seconds);
+        printf("    Branches checkees:   %lld\n", hs_res.branches_explored);
+    }
+
+    printf("\n  Henecka-May-Meurer (algo stats tolerances erreurs):\n");
+    printf("    Resultat:            %s\n", hmm_ret == 0 ? "SUCCESS" : "FAILED");
+    if (hmm_ret == 0) {
+        printf("    Temps d'exec:        %.3f s\n", hmm_res.elapsed_seconds);
+        printf("    Canditats testes:    %lld\n", hmm_res.total_candidates_generated);
+    }
+    printf("    Taille bloc (t):     %d\n", hmm_params.block_size_t);
+    printf("    Seuil (C):           %d\n", hmm_params.threshold_C);
+
+    // menage final
     hmm_result_clear(&hmm_res);
     hs_result_clear(&hs_res);
     init_result_clear(&init_res);

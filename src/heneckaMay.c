@@ -86,7 +86,7 @@ static const char POSSIBILITIES[32][5] = {
 
 /* ---- Equation checks (same as HS09) ---- */
 
-static bool check_eq8(const mpz_t N, const mpz_t p0, const mpz_t q0,
+static bool doesNEqualpq(const mpz_t N, const mpz_t p0, const mpz_t q0,
                       char p_i, char q_i, int i)
 {
     mpz_t term;
@@ -98,7 +98,7 @@ static bool check_eq8(const mpz_t N, const mpz_t p0, const mpz_t q0,
     return ok;
 }
 
-static bool check_eq9(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,
+static bool eTimesd(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,
                       const mpz_t p0, const mpz_t q0, const mpz_t d0,
                       char p_i, char q_i, char d_i, int i)
 {
@@ -117,7 +117,7 @@ static bool check_eq9(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,
     return ok;
 }
 
-static bool check_eq10(const mpz_t e, const mpz_t kp, int tau_kp,
+static bool eTimesdp(const mpz_t e, const mpz_t kp, int tau_kp,
                        const mpz_t p0, const mpz_t dp0,
                        char p_i, char dp_i, int i)
 {
@@ -133,7 +133,7 @@ static bool check_eq10(const mpz_t e, const mpz_t kp, int tau_kp,
     return ok;
 }
 
-static bool check_eq11(const mpz_t e, const mpz_t kq, int tau_kq,
+static bool eTimesdq(const mpz_t e, const mpz_t kq, int tau_kq,
                        const mpz_t q0, const mpz_t dq0,
                        char q_i, char dq_i, int i)
 {
@@ -151,7 +151,7 @@ static bool check_eq11(const mpz_t e, const mpz_t kq, int tau_kq,
 
 /* ---- Termination check ---- */
 
-static bool try_termination(const mpz_t e, const mpz_t kp, const mpz_t kq,
+static bool verify_success(const mpz_t e, const mpz_t kp, const mpz_t kq,
                             const mpz_t N, const mpz_t dp0, const mpz_t dq0,
                             mpz_t out_p, mpz_t out_q)
 {
@@ -214,7 +214,7 @@ void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
 
     double epsilon = 0.5 - delta;
 
-    /* Block size t */
+    // bloc de taille t
     if (params->block_size_t <= 0) {
         double t_float = 10.0 * log(2.0) / (epsilon * epsilon);
         params->block_size_t = (int)ceil(t_float);
@@ -226,7 +226,7 @@ void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
 
     int t = params->block_size_t;
 
-    /* Threshold C */
+    // seuil C basé sur la formule de HMM10
     if (params->threshold_C <= 0) {
         double gamma_0 = sqrt((1.0 + 1.0 / t) * log(2.0) / 10.0);
         params->threshold_C = (int)floor(5.0 * t * (0.5 + gamma_0));
@@ -234,6 +234,10 @@ void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
 
     params->target_delta = delta;
 }
+
+
+
+// rien de fou là en bas juste des focntion utilitaires
 
 void hmm_params_print(const hmm_params_t *params) {
     printf("=== HMM Parameters ===\n");
@@ -252,7 +256,6 @@ void hmm_params_print(const hmm_params_t *params) {
     printf("======================\n");
 }
 
-/* ---- Result init/clear ---- */
 
 void hmm_result_init(hmm_result_t *res) {
     rsa_key_init(&res->recovered_key);
@@ -325,7 +328,7 @@ typedef struct {
     long long *candidates_generated;
 } hmm_expand_ctx_t;
 
-static void expand_block_recursive(
+static void process_block_of_bits(
     hmm_expand_ctx_t *ctx,
     mpz_t cur_p, mpz_t cur_q, mpz_t cur_d, mpz_t cur_dp, mpz_t cur_dq,
     int depth_in_block,
@@ -399,15 +402,15 @@ static void expand_block_recursive(
         char dq_i = POSSIBILITIES[s][4];
 
         /* Check equations (8)-(11) */
-        if (!check_eq8(*ctx->N, cur_p, cur_q, p_i, q_i, global_pos))
+        if (!doesNEqualpq(*ctx->N, cur_p, cur_q, p_i, q_i, global_pos))
             continue;
-        if (!check_eq9(*ctx->N, *ctx->e, *ctx->k, ctx->tau_k,
+        if (!eTimesd(*ctx->N, *ctx->e, *ctx->k, ctx->tau_k,
                        cur_p, cur_q, cur_d, p_i, q_i, d_i, global_pos))
             continue;
-        if (!check_eq10(*ctx->e, *ctx->kp, ctx->tau_kp,
+        if (!eTimesdp(*ctx->e, *ctx->kp, ctx->tau_kp,
                         cur_p, cur_dp, p_i, dp_i, global_pos))
             continue;
-        if (!check_eq11(*ctx->e, *ctx->kq, ctx->tau_kq,
+        if (!eTimesdq(*ctx->e, *ctx->kq, ctx->tau_kq,
                         cur_q, cur_dq, q_i, dq_i, global_pos))
             continue;
 
@@ -451,7 +454,7 @@ static void expand_block_recursive(
         if (dp_i) mpz_setbit(cl_dp, global_pos + ctx->tau_kp);
         if (dq_i) mpz_setbit(cl_dq, global_pos + ctx->tau_kq);
 
-        expand_block_recursive(ctx, cl_p, cl_q, cl_d, cl_dp, cl_dq,
+        process_block_of_bits(ctx, cl_p, cl_q, cl_d, cl_dp, cl_dq,
                                depth_in_block + 1, new_matches);
 
         mpz_clears(cl_p, cl_q, cl_d, cl_dp, cl_dq, NULL);
@@ -465,11 +468,9 @@ static void expand_block_recursive(
     }
 }
 
-/* ========================================================================
- *  Main reconstruction driver
- * ======================================================================== */
 
-static int hmm_run_once(const degraded_key_t *dk,
+
+static int main_hmm_function(const degraded_key_t *dk,
                         const mpz_t k, const mpz_t kp, const mpz_t kq,
                         int tau_k, int tau_kp, int tau_kq,
                         const hmm_params_t *params,
@@ -479,14 +480,15 @@ static int hmm_run_once(const degraded_key_t *dk,
     int half_bits = dk->half_bits;
     int t = params->block_size_t;
     int C = params->threshold_C;
-    int num_blocks = (half_bits + t - 1) / t;  /* ceiling division */
+    int num_blocks = (half_bits + t - 1) / t;
 
-    /* ---- Initialize starting candidate ---- */
+    // initialisation du premier candidat
     candidate_list_t current, next;
     list_init(&current, 16);
     list_init(&next, 64);
 
-    /* Initial candidate: p[0]=1, q[0]=1, corrected LSBs */
+
+    // le candidat initial a p[0]=1, q[0]=1
     hmm_candidate_t start;
     candidate_init(&start);
     mpz_set_ui(start.p, 0);
@@ -494,7 +496,6 @@ static int hmm_run_once(const degraded_key_t *dk,
     mpz_setbit(start.p, 0);
     mpz_setbit(start.q, 0);
 
-    /* Correct LSBs */
     mpz_t modulus;
     mpz_init(modulus);
     mpz_ui_pow_ui(modulus, 2, (unsigned long)(tau_k + 2));
@@ -513,7 +514,7 @@ static int hmm_run_once(const degraded_key_t *dk,
                num_blocks, t, C, half_bits);
     }
 
-    /* ---- Process blocks ---- */
+    // traitement des blocs
     for (int block = 0; block < num_blocks; block++) {
         int block_start = 1 + block * t;  /* bit 0 already set */
 
@@ -521,16 +522,16 @@ static int hmm_run_once(const degraded_key_t *dk,
 
         list_reset(&next);
 
-        /* Check termination on each current candidate before expanding */
+        // on verfie le succes pour chaque candiat avant de poursuivre
         mpz_t cand_p, cand_q;
         mpz_inits(cand_p, cand_q, NULL);
 
         for (int c = 0; c < current.count; c++) {
-            if (try_termination(dk->key.e, kp, kq, dk->key.N,
+            if (verify_success(dk->key.e, kp, kq, dk->key.N,
                                 current.items[c].dp, current.items[c].dq,
                                 cand_p, cand_q))
             {
-                /* Found it! */
+                // réussi
                 result->success = true;
                 mpz_set(result->recovered_key.p, cand_p);
                 mpz_set(result->recovered_key.q, cand_q);
@@ -557,14 +558,14 @@ static int hmm_run_once(const degraded_key_t *dk,
         }
         mpz_clears(cand_p, cand_q, NULL);
 
-        /* Expand each candidate through the block */
+        // expansion d'un candidat
         long long block_generated = 0;
 
         hmm_expand_ctx_t ctx;
         ctx.N = &dk->key.N;
         ctx.e = &dk->key.e;
 
-        /* FIX: Cast the decayed pointers correctly to pass the heap arrays */
+        // fix ici sur les pointeurs qui donnaient un seg fault
         ctx.k = (const mpz_t *)k;
         ctx.kp = (const mpz_t *)kp;
         ctx.kq = (const mpz_t *)kq;
@@ -581,7 +582,7 @@ static int hmm_run_once(const degraded_key_t *dk,
         ctx.block_start = block_start;
         ctx.block_size = t;
 
-        /* Adjust threshold for last block if it's shorter */
+        // si le dernier bloc est plus court on ajuste le seuil
         int effective_t = t;
         if (block_start + t > half_bits)
             effective_t = half_bits - block_start;
@@ -592,7 +593,7 @@ static int hmm_run_once(const degraded_key_t *dk,
         ctx.candidates_generated = &block_generated;
 
         for (int c = 0; c < current.count; c++) {
-            expand_block_recursive(
+            process_block_of_bits(
                 &ctx,
                 current.items[c].p, current.items[c].q,
                 current.items[c].d, current.items[c].dp, current.items[c].dq,
@@ -614,7 +615,7 @@ static int hmm_run_once(const degraded_key_t *dk,
                    current.count, next.count, block_generated);
         }
 
-        /* No survivors → algorithm failed */
+        // aucun survivant, l'algo a échoué
         if (next.count == 0) {
             if (verbose)
                 printf("  [HMM] No candidates survived! Aborting.\n");
@@ -623,19 +624,19 @@ static int hmm_run_once(const degraded_key_t *dk,
             return -1;
         }
 
-        /* Swap current and next */
+        // swap le courant et le next
         candidate_list_t tmp = current;
         current = next;
         next = tmp;
         list_reset(&next);
     }
 
-    /* ---- Final termination check on remaining candidates ---- */
+    // verification de succès sur les candidats restants
     mpz_t final_p, final_q;
     mpz_inits(final_p, final_q, NULL);
 
     for (int c = 0; c < current.count; c++) {
-        if (try_termination(dk->key.e, kp, kq, dk->key.N,
+        if (verify_success(dk->key.e, kp, kq, dk->key.N,
                             current.items[c].dp, current.items[c].dq,
                             final_p, final_q))
         {
@@ -667,7 +668,7 @@ static int hmm_run_once(const degraded_key_t *dk,
     return result->success ? 0 : -1;
 }
 
-/* ---- Public entry point ---- */
+// fct exposée au main
 
 int run_henecka_may(const degraded_key_t *dk,
                     const init_result_t *init,
@@ -686,12 +687,12 @@ int run_henecka_may(const degraded_key_t *dk,
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    /* ---- Attempt 1: kp, kq as given ---- */
+    // on calcule avec kp et kq tels qu'ils ont étés donnés
     gmp_printf("[HMM] Attempt 1: kp=%Zd, kq=%Zd\n", init->kp, init->kq);
     printf("[HMM] τ(k)=%d, τ(kp)=%d, τ(kq)=%d\n\n",
            init->tau_k, init->tau_kp, init->tau_kq);
 
-    int ret = hmm_run_once(dk, init->k, init->kp, init->kq,
+    int ret = main_hmm_function(dk, init->k, init->kp, init->kq,
                            init->tau_k, init->tau_kp, init->tau_kq,
                            params, result, verbose);
 
@@ -704,14 +705,14 @@ int run_henecka_may(const degraded_key_t *dk,
         return 0;
     }
 
-    /* ---- Attempt 2: swap kp/kq ---- */
+    // possible que kp et kq aient été confondus lors de l'exploration donc on les swap
     if (try_swap) {
         printf("\n[HMM] Attempt 1 failed. Retrying with swapped kp/kq ...\n");
 
         int tau_kp_swap = tau(init->kq);
         int tau_kq_swap = tau(init->kp);
 
-        /* Keep cumulative stats */
+
         long long prev_gen = result->total_candidates_generated;
         long long prev_pruned = result->total_candidates_pruned;
         int prev_max = result->max_candidates_at_once;
@@ -720,7 +721,7 @@ int run_henecka_may(const degraded_key_t *dk,
         result->max_candidates_at_once = 0;
         result->blocks_processed = 0;
 
-        ret = hmm_run_once(dk, init->k, init->kq, init->kp,
+        ret = main_hmm_function(dk, init->k, init->kq, init->kp,
                            init->tau_k, tau_kp_swap, tau_kq_swap,
                            params, result, verbose);
 

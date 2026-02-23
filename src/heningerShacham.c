@@ -114,7 +114,7 @@ static void clist_reset(hs_clist_t *cl) {
 
 // Filtre mathématique (à partir de l'article HS09)
 
-static bool check_eq8(const mpz_t N, const mpz_t p0, const mpz_t q0,
+static bool doesNEqualpq(const mpz_t N, const mpz_t p0, const mpz_t q0,
                       char p_i, char q_i, int i)
 {
     mpz_t term;
@@ -126,7 +126,7 @@ static bool check_eq8(const mpz_t N, const mpz_t p0, const mpz_t q0,
     return ok;
 }
 
-static bool check_eq9(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,
+static bool eTimesd(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,
                       const mpz_t p0, const mpz_t q0, const mpz_t d0,
                       char p_i, char q_i, char d_i, int i)
 {
@@ -149,7 +149,7 @@ static bool check_eq9(const mpz_t N, const mpz_t e, const mpz_t k, int tau_k,
     return ok;
 }
 
-static bool check_eq10(const mpz_t e, const mpz_t kp, int tau_kp,
+static bool eTimesdp(const mpz_t e, const mpz_t kp, int tau_kp,
                        const mpz_t p0, const mpz_t dp0,
                        char p_i, char dp_i, int i)
 {
@@ -167,7 +167,7 @@ static bool check_eq10(const mpz_t e, const mpz_t kp, int tau_kp,
     return ok;
 }
 
-static bool check_eq11(const mpz_t e, const mpz_t kq, int tau_kq,
+static bool eTimesdq(const mpz_t e, const mpz_t kq, int tau_kq,
                        const mpz_t q0, const mpz_t dq0,
                        char q_i, char dq_i, int i)
 {
@@ -185,9 +185,9 @@ static bool check_eq11(const mpz_t e, const mpz_t kq, int tau_kq,
     return ok;
 }
 
-// Test initial pour deviner le reste des nombres $p$ et $q$
+// Test initial pour deviner le reste des nombres p et q
 
-static bool try_termination(const mpz_t e, const mpz_t kp, const mpz_t kq,
+static bool verify_success(const mpz_t e, const mpz_t kp, const mpz_t kq,
                             const mpz_t N, const mpz_t dp0, const mpz_t dq0,
                             mpz_t out_p, mpz_t out_q)
 {
@@ -236,7 +236,7 @@ static int hs_run_once(const degraded_key_t *dk,
 {
     int half_bits = dk->half_bits;
 
-    //candidat initial
+    // racine de l'arbre, on a besoin d'impairs (premiers) donc on mets les lsb à 1
     hs_candidate_t seed;
     cand_init(&seed);
     mpz_set_ui(seed.p, 0);  mpz_setbit(seed.p, 0);
@@ -283,11 +283,13 @@ static int hs_run_once(const degraded_key_t *dk,
                    depth, half_bits, current.count, result->branches_explored);
         }
 
-        // Vérification
+        // on verifie chaque fois si on a réussi en appelant verify_success
+        // si c'est vrai on copie dans la struct recovered key
+        // sinon on continue
         mpz_t cp, cq;
         mpz_inits(cp, cq, NULL);
         for (int c = 0; c < current.count; c++) {
-            if (try_termination(dk->key.e, kp, kq, dk->key.N,
+            if (verify_success(dk->key.e, kp, kq, dk->key.N,
                                 current.items[c].dp, current.items[c].dq,
                                 cp, cq))
             {
@@ -315,11 +317,13 @@ static int hs_run_once(const degraded_key_t *dk,
                 return 0;
             }
         }
+        // dans tt les cas on efface cp et cq (c pour candidat)
         mpz_clears(cp, cq, NULL);
 
         
         clist_reset(&next);
-
+        // et on reprend avec une 1ere verif avec les 32 possibilités
+        // afin de réduire l'ensemble de recherche
         for (int c = 0; c < current.count; c++) {
             hs_candidate_t *cand = &current.items[c];
 
@@ -332,28 +336,31 @@ static int hs_run_once(const degraded_key_t *dk,
 
                 result->branches_explored++;
 
-                if (!check_eq8(dk->key.N, cand->p, cand->q, p_i, q_i, depth)) {
+
+                // ici on verifie avec les equations 2-adiques données
+                if (!doesNEqualpq(dk->key.N, cand->p, cand->q, p_i, q_i, depth)) {
                     result->branches_pruned++;
                     continue;
                 }
-                if (!check_eq9(dk->key.N, dk->key.e, k, tau_k,
+                if (!eTimesd(dk->key.N, dk->key.e, k, tau_k,
                                cand->p, cand->q, cand->d,
                                p_i, q_i, d_i, depth)) {
                     result->branches_pruned++;
                     continue;
                 }
-                if (!check_eq10(dk->key.e, kp, tau_kp,
+                if (!eTimesdp(dk->key.e, kp, tau_kp,
                                 cand->p, cand->dp, p_i, dp_i, depth)) {
                     result->branches_pruned++;
                     continue;
                 }
-                if (!check_eq11(dk->key.e, kq, tau_kq,
+                if (!eTimesdq(dk->key.e, kq, tau_kq,
                                 cand->q, cand->dq, q_i, dq_i, depth)) {
                     result->branches_pruned++;
                     continue;
                 }
 
-                // Vérifier les bits connus
+                // si les candidats survivent aux verifications mathématiques on fait une
+                // comparaison avec ce qu'on a dans le dump
                 bool ok = true;
 
                 if (kn_p[depth] != BIT_UNKNOWN && kn_p[depth] != p_i)
@@ -382,7 +389,8 @@ static int hs_run_once(const degraded_key_t *dk,
                     continue;
                 }
 
-                // validation
+                // si il reussit la verif des maths + le dump c'est un bon candidat
+                // il peut donc passer à la prochaine phase
                 hs_candidate_t child;
                 cand_init(&child);
                 cand_copy(&child, cand);
@@ -407,6 +415,8 @@ static int hs_run_once(const degraded_key_t *dk,
             return -1;
         }
 
+
+        // si pas de candidats dans cet endroit, mauvais chemin
         if (next.count == 0) {
             if (verbose)
                 printf("  [HS] No candidates at depth %d - aborting\n", depth);
@@ -424,7 +434,7 @@ static int hs_run_once(const degraded_key_t *dk,
     mpz_t fp, fq;
     mpz_inits(fp, fq, NULL);
     for (int c = 0; c < current.count; c++) {
-        if (try_termination(dk->key.e, kp, kq, dk->key.N,
+        if (verify_success(dk->key.e, kp, kq, dk->key.N,
                             current.items[c].dp, current.items[c].dq,
                             fp, fq))
         {
@@ -455,7 +465,7 @@ static int hs_run_once(const degraded_key_t *dk,
     return result->success ? 0 : -1;
 }
 
-// point d'entrée principale
+// pfct exposée au main
 
 int run_heninger_shacham(const degraded_key_t *dk,
                          const init_result_t *init,
@@ -486,7 +496,7 @@ int run_heninger_shacham(const degraded_key_t *dk,
         return 0;
     }
 
-    // Tentative 2 : Si échec, inversion de kp et kq
+    // comme pour hmm 10, il se peut que kp et kq soient inversés
     if (try_swap) {
         printf("\n[HS] Attempt 1 failed (%lld branches explored).\n",
                result->branches_explored);

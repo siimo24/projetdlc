@@ -1,42 +1,35 @@
 #include "decay_sim.h"
 
-
+// rng local
 static unsigned long rng_state;
 
 static void rng_seed(unsigned long seed) {
     rng_state = seed ? seed : (unsigned long)time(NULL);
 }
 
-// entier uniforme dans 0,1
+// sort un double entre 0 et 1 (algo xorshift64, basique mais rapide et fait le taff)
 static double rng_uniform(void) {
-    /* xorshift64 — fast and reasonable quality */
     rng_state ^= rng_state << 13;
     rng_state ^= rng_state >> 7;
     rng_state ^= rng_state << 17;
     return (double)(rng_state & 0x7FFFFFFFFFFFFFFF) / (double)0x7FFFFFFFFFFFFFFF;
 }
 
-//on aura besoin du bernoulli pour décider si on va dégrader un  bit ou pas
+// un pile ou face truqué avec proba p (pour le % de decay)
 static bool rng_bernoulli(double p) {
     return rng_uniform() < p;
 }
 
-/* Modélsiation du modèle de dégradation selon le papier :
- *                    k (rate)     t_mid (seconds)
- *   Room (25°C):     0.5          10
- *   Cold (-50°C):    0.01         600
- *   Azote liquide (-196°C):   0.0003       36000
- */
-
+// les presets tirés du papier HSH08 (température et tps)
 void decay_params_preset(decay_params_t *params, const char *preset) {
     memset(params, 0, sizeof(*params));
 
-    params->wrong_dir_prob = 0.001;         // delta1
-    params->ground_state_block_size = 256;  // taille du bloc ayant un ground identique
+    params->wrong_dir_prob = 0.001;         // le fameux delta1 (erreur thermique random)
+    params->ground_state_block_size = 256;  // taille d'un bloc memoire avec le meme gnd
     params->random_ground_start = true;
-    params->seed = 0;                       // 0 donc on utilise time
+    params->seed = 0;                       // 0 = on tape sur l'heure de l'OS
 
-    if (strcmp(preset, "room") == 0) { // on verifie en fct de ce qui a été donné dans les flags
+    if (strcmp(preset, "room") == 0) {
         params->temperature_celsius = 25.0;
         params->time_seconds = 10.0;
         params->decay_rate_k = 0.5;
@@ -50,12 +43,12 @@ void decay_params_preset(decay_params_t *params, const char *preset) {
     }
     else if (strcmp(preset, "frozen") == 0) {
         params->temperature_celsius = -196.0;
-        params->time_seconds = 3600.0;  // 60 minutes
+        params->time_seconds = 3600.0;  // 1h sous azote liquide
         params->decay_rate_k = 0.0003;
         params->decay_midpoint = 36000.0;
     }
     else {
-        // autre que les cas classiques, ils sont passés via les flags
+        // fallback si le mec rentre nimp ou "custom"
         params->temperature_celsius = 25.0;
         params->time_seconds = 0.0;
         params->decay_rate_k = 0.5;
@@ -63,18 +56,21 @@ void decay_params_preset(decay_params_t *params, const char *preset) {
     }
 }
 
+
+
+
+// calcul proba de decay basee sur la temperature et le tps (la fameuse courbe logistique)
 double compute_decay_probability(const decay_params_t *params) {
     double exponent = -params->decay_rate_k * (params->time_seconds - params->decay_midpoint);
 
-    /* Clamp to avoid overflow */
+    // on clamp pcq les floats en C ca part vite en overflow si l'expo est enorme
     if (exponent > 500.0)  return 0.0;
     if (exponent < -500.0) return 1.0;
 
     return 1.0 / (1.0 + exp(exponent));
 }
 
-
-// résultats de la simulation de dégradation
+// ptit print des stats de simu
 void decay_params_print(const decay_params_t *params) {
     double decay_prob = compute_decay_probability(params);
 
@@ -93,22 +89,14 @@ void decay_params_print(const decay_params_t *params) {
     printf("========================\n");
 }
 
-// on décide de l'état ground à donner à un bit
+// check si la zone memoire a un etat de repos (gnd) à 0 ou à 1
 static int ground_state_for_bit(int bit_index, int block_size, int first_block_polarity) {
     int block_num = bit_index / block_size;
     return (block_num + first_block_polarity) % 2;
 }
 
 
-/*
- * decay_prob      delta0
- * wrong_dir_prob  delta1
- * bit_offset      offset pour le calul du ground
- */
-
-// la dégradation pour un seul nombre gmp se fait ici, decay_prob correspond à la proba
-// qu'un 1 devienne 0, et wrong dir à ce qu'un bit 0 devienne 1
-
+// fct core de la simu: elle detruit un entier GMP bit par bit en fct de son gnd
 static void degrade_component(
     const mpz_t original, mpz_t degraded, int *known_bits, int num_bits,
     double decay_prob, double wrong_dir_prob,
@@ -125,37 +113,37 @@ static void degrade_component(
         int degraded_bit = orig_bit;
 
         if (orig_bit != gs) {
-            // si le bit != gnd, on le flippe avec une proba delta0 (qu'un 1 devienne 0)
+            // bit opposé au ground -> il perd son jus avec proba delta0
             if (rng_bernoulli(decay_prob)) {
                 degraded_bit = gs;
                 (*stats_flipped)++;
             }
         } else {
-            // si le bit = gnd, on le flippe avec une proba delta1 (qu'un 0 devienne 1)
+            // bit dejà sur le ground -> rare bruit thermique (delta1)
             if (rng_bernoulli(wrong_dir_prob)) {
                 degraded_bit = 1 - gs;
                 (*stats_flipped)++;
             }
         }
 
-        // on applique le bit qu'on a (probablement) flippé
+        // on ecrit le bit (peut-etre) flippé
         if (degraded_bit)
             mpz_setbit(degraded, i);
         else
             mpz_clrbit(degraded, i);
 
-      // l'attaquant connait le ground state, il ne peur pas se fier aux bits qui sont égaux au gnd
+        // POV de l'attaquant: s'il voit un bit opposé au gnd, il sait que c'est legit
         if (degraded_bit != gs) {
-            // diff de ground -> forcément correct
-            known_bits[i] = degraded_bit;
+            known_bits[i] = degraded_bit; // bingo
             (*stats_known)++;
         } else {
-            // égal au ground, on n'est pas trop sûr
+            // bit confondu avec le gnd -> effacement
             known_bits[i] = BIT_UNKNOWN;
         }
     }
 }
 
+// applique la simu a toute la clef entiere
 void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
                  const decay_params_t *params)
 {
@@ -164,7 +152,7 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
 
     rng_seed(params->seed);
 
-    /* Random first block polarity */
+    // on tire au pif si la ram physique commence par un bloc de 0 ou de 1
     int first_polarity = params->random_ground_start ? (rng_bernoulli(0.5) ? 1 : 0) : 0;
 
     printf("[DECAY] Applying decay: T=%.1f°C, t=%.1fs, δ₀=%.6f, δ₁=%.6f\n",
@@ -180,14 +168,13 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     int total_flipped = 0, total_known = 0, total_bits = 0;
     int flipped, known;
 
-    // on applique différents offsets pour que les états ground soient indépendants et qu'on parvienne à simuler
-    // des zones mémoires non contigues
+    // on met des offsets random pcq les vars sont physiquement eparpillées ds la puce
     int offsets[5];
     for (int i = 0; i < 5; i++) {
         offsets[i] = (int)(rng_uniform() * 10000);
     }
 
-    // degradation de p
+    // on degrade les 5 morceaux un par un
     degrade_component(original->p, dk->key.p, dk->known_p, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[0], &flipped, &known);
@@ -195,7 +182,6 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  p:  %d/%d known (%.1f%%), %d flipped\n",
            known, dk->half_bits, 100.0*known/dk->half_bits, flipped);
 
-    // pour q
     degrade_component(original->q, dk->key.q, dk->known_q, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[1], &flipped, &known);
@@ -203,7 +189,6 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  q:  %d/%d known (%.1f%%), %d flipped\n",
            known, dk->half_bits, 100.0*known/dk->half_bits, flipped);
 
-    // pour d
     degrade_component(original->d, dk->key.d, dk->known_d, dk->full_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[2], &flipped, &known);
@@ -211,7 +196,6 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  d:  %d/%d known (%.1f%%), %d flipped\n",
            known, dk->full_bits, 100.0*known/dk->full_bits, flipped);
 
-    // pour dp
     degrade_component(original->dp, dk->key.dp, dk->known_dp, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[3], &flipped, &known);
@@ -219,7 +203,6 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
     printf("  dp: %d/%d known (%.1f%%), %d flipped\n",
            known, dk->half_bits, 100.0*known/dk->half_bits, flipped);
 
-    // pour dq
     degrade_component(original->dq, dk->key.dq, dk->known_dq, dk->half_bits,
                       decay_prob, params->wrong_dir_prob, block_size, first_polarity,
                       offsets[4], &flipped, &known);
@@ -235,14 +218,18 @@ void apply_decay(const rsa_key_t *original, degraded_key_t *dk,
            100.0 * dk->error_rate);
 }
 
-// fonction pour dégradation simple
+// ==========================================================
+// Mode simple : pour test d'algo brut (sans physique de ram)
+// ==========================================================
 static void simple_degrade_component(const mpz_t orig, mpz_t deg, int *known, int nbits,
                                      double known_fraction, double error_rate) {
     mpz_set(deg, orig);
     for (int i = 0; i < nbits; i++) {
         int orig_bit = get_bit(orig, i);
 
+        // on le garde ?
         if (rng_bernoulli(known_fraction)) {
+            // oui, mais est-ce qu'il est foiré par une erreur ?
             if (rng_bernoulli(error_rate)) {
                 int wrong_bit = 1 - orig_bit;
                 if (wrong_bit) mpz_setbit(deg, i);
@@ -252,6 +239,7 @@ static void simple_degrade_component(const mpz_t orig, mpz_t deg, int *known, in
                 known[i] = orig_bit;
             }
         } else {
+            // effacé
             known[i] = BIT_UNKNOWN;
         }
     }

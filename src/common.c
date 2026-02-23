@@ -1,37 +1,34 @@
 #include "common.h"
 
-// fichier avec les fonctions utilitaires
 
-
-
-
-//init d'objets mpz a partir d'une struct de clé rsa générée
+// on setup les gros entiers (mpz) pour stocker une clef RSA propore
 void rsa_key_init(rsa_key_t *key) {
     mpz_inits(key->N, key->e, key->d, key->p, key->q,
               key->dp, key->dq, key->qinv, NULL);
     key->bits = 0;
 }
 
-// liberation de la mémoire
+// menage pour eviter les fuites memoire (tjrs free ce qu'on malloc ofc)
 void rsa_key_clear(rsa_key_t *key) {
     mpz_clears(key->N, key->e, key->d, key->p, key->q,
                key->dp, key->dq, key->qinv, NULL);
 }
 
-// init d'une clé dégradée
+// init de la structure pour la clef pêtée (post cold-boot)
 void degraded_key_init(degraded_key_t *dk, int key_bits) {
     rsa_key_init(&dk->key);
     dk->key.bits = key_bits;
     dk->half_bits = key_bits / 2;
     dk->full_bits = key_bits;
 
-    /* Allocate known-bits arrays, initialize all to UNKNOWN */
+    // on alloue les arrays pour tracker l'etat de chaque bit de la ram
     dk->known_p  = (int *)malloc(dk->half_bits * sizeof(int));
     dk->known_q  = (int *)malloc(dk->half_bits * sizeof(int));
     dk->known_d  = (int *)malloc(dk->full_bits * sizeof(int));
     dk->known_dp = (int *)malloc(dk->half_bits * sizeof(int));
     dk->known_dq = (int *)malloc(dk->half_bits * sizeof(int));
 
+    // par defaut on sait r, tout est incertain (UNKNOWN)
     for (int i = 0; i < dk->half_bits; i++) {
         dk->known_p[i]  = BIT_UNKNOWN;
         dk->known_q[i]  = BIT_UNKNOWN;
@@ -46,6 +43,7 @@ void degraded_key_init(degraded_key_t *dk, int key_bits) {
     dk->error_rate = 0.0;
 }
 
+// on clean la ram
 void degraded_key_clear(degraded_key_t *dk) {
     rsa_key_clear(&dk->key);
     free(dk->known_p);
@@ -55,63 +53,61 @@ void degraded_key_clear(degraded_key_t *dk) {
     free(dk->known_dq);
 }
 
-// recupere la valuation 2-adique (cb de 0 trainent à la fin pour savoir quelle puissance de 10 divise ce nombre)
+// recup de la valuation 2-adique (en gros : cb de 0 de suite a la fin en binaire ?)
+// ultra important pour shiffter les eq pdt la reconstruction
 int tau(const mpz_t x) {
     if (mpz_cmp_ui(x, 0) == 0) return 0;
-    return (int)mpz_scan1(x, 0);   /* GMP: index of lowest set bit */
+    return (int)mpz_scan1(x, 0);   // merci GMP pour cette fct opti
 }
 
-
-//wrapper the test bit pour avoir un int
+// ptit wrapper pour chopper un bit precis direct en int (plus opti a lire)
 int get_bit(const mpz_t num, int i) {
     return (int)mpz_tstbit(num, (mp_bitcnt_t)i);
 }
 
-/* --- RSA Key Verification --- */
-
+// check complet : est-ce que notre clef tient la route mathematiquement ?
 bool rsa_key_verify(const rsa_key_t *key) {
     bool valid = true;
     mpz_t tmp, phi, p1, q1;
     mpz_inits(tmp, phi, p1, q1, NULL);
 
-    /* Check N = p * q */
+    // base: N = p * q ?
     mpz_mul(tmp, key->p, key->q);
     if (mpz_cmp(tmp, key->N) != 0) {
-        fprintf(stderr, "[VERIFY] FAIL: N != p * q\n");
+        fprintf(stderr, "[VERIFY] aie: N != p * q\n");
         valid = false;
     }
 
-    // On verifie que e * d est congru à 1 mod phi n
+    // check exposant: e * d = 1 mod phi(N) ?
     mpz_sub_ui(p1, key->p, 1);
     mpz_sub_ui(q1, key->q, 1);
     mpz_mul(phi, p1, q1);
     mpz_mul(tmp, key->e, key->d);
     mpz_mod(tmp, tmp, phi);
     if (mpz_cmp_ui(tmp, 1) != 0) {
-        fprintf(stderr, "[VERIFY] FAIL: e*d != 1 mod phi(N)\n");
+        fprintf(stderr, "[VERIFY] aie: e*d != 1 mod phi(N)\n");
         valid = false;
     }
 
-
-    // on verif que dp congru à d mod (p-1)
+    // check param CRT 1: dp = d mod (p-1) ?
     mpz_mod(tmp, key->d, p1);
     if (mpz_cmp(tmp, key->dp) != 0) {
-        fprintf(stderr, "[VERIFY] FAIL: dp != d mod (p-1)\n");
+        fprintf(stderr, "[VERIFY] aie: dp != d mod (p-1)\n");
         valid = false;
     }
 
-    // dq  congru à d mod q-1 ?
+    // check param CRT 2: dq = d mod (q-1) ?
     mpz_mod(tmp, key->d, q1);
     if (mpz_cmp(tmp, key->dq) != 0) {
-        fprintf(stderr, "[VERIFY] FAIL: dq != d mod (q-1)\n");
+        fprintf(stderr, "[VERIFY] aie: dq != d mod (q-1)\n");
         valid = false;
     }
 
-    // q inv * q congru à 1 mod p?
+    // check param CRT 3: qinv * q = 1 mod p ?
     mpz_mul(tmp, key->qinv, key->q);
     mpz_mod(tmp, tmp, key->p);
     if (mpz_cmp_ui(tmp, 1) != 0) {
-        fprintf(stderr, "[VERIFY] FAIL: qinv*q != 1 mod p\n");
+        fprintf(stderr, "[VERIFY] aie: qinv*q != 1 mod p\n");
         valid = false;
     }
 
@@ -119,8 +115,10 @@ bool rsa_key_verify(const rsa_key_t *key) {
     return valid;
 }
 
-/* --- I/O Functions --- */
+// Fcts d'I/O (lecture / ecriture de fichiers txt)
 
+
+// dump la clef RSA ds un fichier
 int rsa_key_export(const rsa_key_t *key, const char *filename) {
     FILE *f = fopen(filename, "w");
     if (!f) {
@@ -142,8 +140,7 @@ int rsa_key_export(const rsa_key_t *key, const char *filename) {
     return 0;
 }
 
-
-//lire une clé
+// parse un fichier pour rebuild la struct RSA
 int rsa_key_import(rsa_key_t *key, const char *filename) {
     FILE *f = fopen(filename, "r");
     if (!f) {
@@ -153,14 +150,14 @@ int rsa_key_import(rsa_key_t *key, const char *filename) {
 
     char line[8192];
     while (fgets(line, sizeof(line), f)) {
-        /* Remove trailing newline */
+        // on degage le saut de ligne
         line[strcspn(line, "\n")] = '\0';
 
         char *eq = strchr(line, '=');
-        if (!eq) continue;
+        if (!eq) continue; // skip si ligne mal formatee
 
         char *name = line;
-        *eq = '\0';
+        *eq = '\0'; // coupe la string en deux
         char *value = eq + 1;
 
         if (strcmp(name, "bits") == 0) {
@@ -188,7 +185,7 @@ int rsa_key_import(rsa_key_t *key, const char *filename) {
     return 0;
 }
 
-// exporter les bits qu'on connait à un fichier donné
+// on save que les bits dont on est 100% sur (on skip les UNKNOWN)
 static int export_known_bits(const int *bits, int count, const char *filepath) {
     FILE *f = fopen(filepath, "w");
     if (!f) { perror("export_known_bits"); return -1; }
@@ -202,15 +199,14 @@ static int export_known_bits(const int *bits, int count, const char *filepath) {
     return 0;
 }
 
-
-//utilise la fct au dessus pour exporter toutes les sous infos de la clé
+// gros export de tte l'orga de la clef degradee (clef entiere + arrays de bits + stats)
 int degraded_key_export(const degraded_key_t *dk, const char *directory) {
     char path[512];
 
     snprintf(path, sizeof(path), "%s/degraded_key.txt", directory);
     rsa_key_export(&dk->key, path);
 
-
+    // export des bits viables par composant
     snprintf(path, sizeof(path), "%s/known_bits_p.txt", directory);
     export_known_bits(dk->known_p, dk->half_bits, path);
 
@@ -226,7 +222,7 @@ int degraded_key_export(const degraded_key_t *dk, const char *directory) {
     snprintf(path, sizeof(path), "%s/known_bits_dq.txt", directory);
     export_known_bits(dk->known_dq, dk->half_bits, path);
 
-    // on exporte les statistiques
+    // ecriture des stats post decay
     snprintf(path, sizeof(path), "%s/decay_stats.txt", directory);
     FILE *f = fopen(path, "w");
     if (f) {
@@ -238,11 +234,13 @@ int degraded_key_export(const degraded_key_t *dk, const char *directory) {
     return 0;
 }
 
-// recup des bits depuis un fichier
+// on recharge la map des bits depuis le disque
 static void import_known_bits_from_file(int *bits, int count, const char *filepath) {
-    for (int i = 0; i < count; i++) bits[i] = BIT_UNKNOWN;
+    for (int i = 0; i < count; i++) bits[i] = BIT_UNKNOWN; // reset a 0 (enfin a -1)
+
     FILE *f = fopen(filepath, "r");
     if (!f) return;
+
     int idx, val;
     while (fscanf(f, "%d %d", &idx, &val) == 2) {
         if (idx >= 0 && idx < count)
@@ -251,17 +249,17 @@ static void import_known_bits_from_file(int *bits, int count, const char *filepa
     fclose(f);
 }
 
+// inverse de l'export juste au-dessus
 int degraded_key_import(degraded_key_t *dk, const char *directory) {
     char path[512];
 
-    /* Import degraded key values */
     snprintf(path, sizeof(path), "%s/degraded_key.txt", directory);
     if (rsa_key_import(&dk->key, path) != 0) return -1;
 
-    /* Re-init arrays based on imported key size */
     dk->half_bits = dk->key.bits / 2;
     dk->full_bits = dk->key.bits;
 
+    // recharge les tableaux
     snprintf(path, sizeof(path), "%s/known_bits_p.txt", directory);
     import_known_bits_from_file(dk->known_p, dk->half_bits, path);
 
@@ -280,7 +278,8 @@ int degraded_key_import(degraded_key_t *dk, const char *directory) {
     return 0;
 }
 
-//affichage
+
+// Fcts de print (CLI)
 
 void rsa_key_print_summary(const rsa_key_t *key, const char *label) {
     printf("=== %s (%d-bit RSA-CRT Key) ===\n", label, key->bits);
@@ -296,7 +295,7 @@ void rsa_key_print_summary(const rsa_key_t *key, const char *label) {
 }
 
 void degraded_key_print_stats(const degraded_key_t *dk) {
-    // on compte le nb de bits connus par composant
+    // on scan nos tableaux pour voir l'etendue des degats
     int known_p = 0, known_q = 0, known_d = 0, known_dp = 0, known_dq = 0;
     int total_known = 0, total_bits = 0;
 

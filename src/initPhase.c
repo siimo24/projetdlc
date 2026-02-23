@@ -1,31 +1,17 @@
 #include "init_phase.h"
 
-/* ========================================================================
- *  init_phase.c — Initialization Phase for RSA Key Reconstruction
- *
- *  Mathematical background (HS09, Section 3):
- *
- *  From RSA: e·d = 1 + k·φ(N) = 1 + k·(N − p − q + 1)
- *  Since p+q is negligible compared to N (both are ~n/2 bits, N is ~n bits):
- *    d ≈ (k·(N+1) + 1) / e    for the correct k
- *  This approximation is exact in the top n/2 bits of d.
- *
- *  For CRT exponents:
- *    e·dp = 1 + kp·(p−1),  e·dq = 1 + kq·(q−1)
- *  Combining with the main equation gives:
- *    kp² − [k(N−1)+1]·kp − k ≡ 0  (mod e)
- *  which has exactly 2 solutions mod e (when e is prime): kp and kq.
- * ======================================================================== */
+// Phase d'init de l'attaque. On recup k, kp et kq avant de lancer l'arbre de recherche.
 
-/* --- Init/Clear --- */
+/* --- Fonctions d'init basiques --- */
 
 void init_result_init(init_result_t *res) {
+    // init des var GMP, classique
     mpz_inits(res->k, res->kp, res->kq, NULL);
     mpz_inits(res->d_msb_corrected, NULL);
     mpz_inits(res->p0, res->q0, res->d0, res->dp0, res->dq0, NULL);
     res->tau_k = res->tau_kp = res->tau_kq = 0;
     res->valid = false;
-    res->kp_kq_swapped = false;
+    res->kp_kq_swapped = false; // au cas ou on les inverse plus tard
 }
 
 void init_result_clear(init_result_t *res) {
@@ -35,6 +21,7 @@ void init_result_clear(init_result_t *res) {
 }
 
 void init_result_print(const init_result_t *res) {
+    // affichage de debug, tkt c'est juste du print
     printf("=== Init Phase Results ===\n");
     gmp_printf("  k    = %Zd\n", res->k);
     gmp_printf("  kp   = %Zd\n", res->kp);
@@ -59,18 +46,9 @@ void init_result_print(const init_result_t *res) {
     printf("==========================\n");
 }
 
-/* ========================================================================
- *  Step 1: Find k
- *
- *  For each candidate k' ∈ [1, e-1]:
- *    d̃(k') = ⌊(k'·(N+1) + 1) / e⌋
- *  Compare the top (n/2 − 2) bits of d̃(k') with degraded d.
- *  The k' with the most matching MSBs is our k.
- *
- *  Why n/2 − 2 bits? Because p+q has at most n/2 + 1 bits, so
- *  d̃(k) and d agree on at least the top n/2 − 2 bits.
- * ======================================================================== */
 
+// on bruteforce k. e est petit (genre 65537) donc ca va super vite.
+// On compare les MSB (poids fort) calculés avec ceux du dump
 int find_k(const mpz_t N, const mpz_t e, const mpz_t degraded_d,
            mpz_t out_k, mpz_t out_d_tilde, bool verbose)
 {
@@ -80,7 +58,7 @@ int find_k(const mpz_t N, const mpz_t e, const mpz_t degraded_d,
     mpz_add_ui(N_plus_1, N, 1);
 
     size_t total_bits = mpz_sizeinbase(degraded_d, 2);
-    size_t msb_count = (total_bits / 2) - 2;
+    size_t msb_count = (total_bits / 2) - 2; // on check que la moitié haute
 
     int best_match = 0;
     int best_match_k_count = 0;
@@ -91,24 +69,25 @@ int find_k(const mpz_t N, const mpz_t e, const mpz_t degraded_d,
         printf("[INIT] Searching k' in [1, e-1] ...\n");
     }
 
-    /* Iterate all candidates k' from 1 to e-1 */
+    // boucle sur tous les k possibles
     for (mpz_set_ui(k_candidate, 1);
          mpz_cmp(k_candidate, e) < 0;
          mpz_add_ui(k_candidate, k_candidate, 1))
     {
-        /* d̃(k') = ⌊(k'·(N+1) + 1) / e⌋ */
+        // calcul de l'approximation de d
         mpz_mul(temp, k_candidate, N_plus_1);
         mpz_add_ui(temp, temp, 1);
         mpz_fdiv_q(d_tilde, temp, e);
 
-        /* Count matching MSBs */
+        // on compte cb de bits matchent
         int matching = 0;
         for (size_t i = 0; i < msb_count; i++) {
-            size_t bit_idx = total_bits - 1 - i;  /* From MSB downward */
+            size_t bit_idx = total_bits - 1 - i;
             if (mpz_tstbit(d_tilde, bit_idx) == mpz_tstbit(degraded_d, bit_idx))
                 matching++;
         }
 
+        // maj du meilleur candidat
         if (matching > best_match) {
             best_match = matching;
             mpz_set(out_k, k_candidate);
@@ -133,13 +112,8 @@ int find_k(const mpz_t N, const mpz_t e, const mpz_t degraded_d,
     return best_match;
 }
 
-/* ========================================================================
- *  Step 2: Correct MSB half of d
- *
- *  Take top (n/2 − 2) bits from d̃(k), bottom bits from degraded d.
- *  Result: d with corrected MSBs, degraded LSBs.
- * ======================================================================== */
 
+//  fusionne les bons MSB qu'on vient de calculer avec les LSB tout pétés de la RAM
 void correct_d_msb(const mpz_t d_tilde, const mpz_t degraded_d,
                    mpz_t out_d, int n_bits)
 {
@@ -153,18 +127,17 @@ void correct_d_msb(const mpz_t d_tilde, const mpz_t degraded_d,
     size_t msb_bits = (total_bits / 2) - 2;
     size_t lsb_bits = total_bits - msb_bits;
 
-    /* MSB mask: msb_bits ones shifted left by lsb_bits */
+    // creation des masques pour decouper les bits
     mpz_set_ui(msb_mask, 1);
     mpz_mul_2exp(msb_mask, msb_mask, msb_bits);
     mpz_sub_ui(msb_mask, msb_mask, 1);
     mpz_mul_2exp(msb_mask, msb_mask, lsb_bits);
 
-    /* LSB mask: lsb_bits ones */
     mpz_set_ui(lsb_mask, 1);
     mpz_mul_2exp(lsb_mask, lsb_mask, lsb_bits);
     mpz_sub_ui(lsb_mask, lsb_mask, 1);
 
-    /* Combine: MSBs from d̃(k), LSBs from degraded d */
+    // on assemble le frankenstein
     mpz_and(msb_part, d_tilde, msb_mask);
     mpz_and(lsb_part, degraded_d, lsb_mask);
     mpz_ior(out_d, msb_part, lsb_part);
@@ -172,30 +145,17 @@ void correct_d_msb(const mpz_t d_tilde, const mpz_t degraded_d,
     mpz_clears(msb_mask, lsb_mask, msb_part, lsb_part, NULL);
 }
 
-/* ========================================================================
- *  Step 3: Tonelli-Shanks algorithm
- *
- *  Computes r such that r² ≡ n (mod p), where p is an odd prime.
- *  Returns both roots: r and p − r.
- *
- *  Algorithm:
- *   1. Write p−1 = Q · 2^S (Q odd)
- *   2. Find z: a quadratic non-residue mod p
- *   3. Set M=S, c=z^Q, t=n^Q, R=n^((Q+1)/2)
- *   4. Loop: find smallest i where t^(2^i) ≡ 1, update c, t, R, M
- *   5. When t=1: R is the square root
- * ======================================================================== */
 
+// Algo de Tonelli-Shanks. relou à coder mais obligatoire pour les racines carr mod p
 int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
-    /* Check that n is a quadratic residue mod p */
+    // check si n est un residu quadratique sinon c'est mort d'avance
     if (mpz_legendre(n, p) != 1) {
-        return -1;  /* Not a QR, no solution */
+        return -1;
     }
 
     mpz_t Q, z, M, c, t, R, temp, b, exponent;
     mpz_inits(Q, z, M, c, t, R, temp, b, exponent, NULL);
 
-    /* Factor p−1 = Q · 2^S */
     mpz_sub_ui(Q, p, 1);
     unsigned long S = 0;
     while (mpz_even_p(Q)) {
@@ -203,13 +163,13 @@ int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
         S++;
     }
 
-    /* Find quadratic non-residue z */
+    // recherche du non-residu
     mpz_set_ui(z, 2);
     while (mpz_legendre(z, p) != -1) {
         mpz_add_ui(z, z, 1);
     }
 
-    /* Initialize: c = z^Q mod p, t = n^Q mod p, R = n^((Q+1)/2) mod p */
+    // setup
     mpz_powm(c, z, Q, p);
     mpz_powm(t, n, Q, p);
     mpz_add_ui(temp, Q, 1);
@@ -217,9 +177,8 @@ int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
     mpz_powm(R, n, temp, p);
     mpz_set_ui(M, S);
 
-    /* Main loop */
+     // boucle principale
     while (mpz_cmp_ui(t, 0) != 0 && mpz_cmp_ui(t, 1) != 0) {
-        /* Find smallest i such that t^(2^i) ≡ 1 mod p */
         unsigned long i = 0;
         mpz_set(temp, t);
         while (mpz_cmp_ui(temp, 1) != 0) {
@@ -227,18 +186,15 @@ int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
             i++;
         }
 
-        /* If i == M, no solution (shouldn't happen if n is QR) */
         if (i == mpz_get_ui(M)) {
             mpz_clears(Q, z, M, c, t, R, temp, b, exponent, NULL);
-            return -1;
+            return -1; // erreur chelou
         }
 
-        /* b = c^(2^(M−i−1)) mod p */
         unsigned long exp_val = mpz_get_ui(M) - i - 1;
         mpz_ui_pow_ui(exponent, 2, exp_val);
         mpz_powm(b, c, exponent, p);
 
-        /* Update: c = b², t = t·c, R = R·b, M = i */
         mpz_powm_ui(c, b, 2, p);
         mpz_mul(t, t, c);
         mpz_mod(t, t, p);
@@ -247,10 +203,9 @@ int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
         mpz_set_ui(M, i);
     }
 
-    /* Set solutions */
     if (mpz_cmp_ui(t, 1) == 0) {
         mpz_set(root1, R);
-        mpz_sub(root2, p, R);  /* root2 = p − R */
+        mpz_sub(root2, p, R); // root2 = p - R
     } else {
         mpz_clears(Q, z, M, c, t, R, temp, b, exponent, NULL);
         return -1;
@@ -260,65 +215,40 @@ int tonelli_shanks(const mpz_t n, const mpz_t p, mpz_t root1, mpz_t root2) {
     return 0;
 }
 
-/* ========================================================================
- *  Step 3b: Solve quadratic for kp, kq
- *
- *  Equation: kp² − [k(N−1)+1]·kp − k ≡ 0 (mod e)
- *
- *  Complete the square:
- *    Let A = [k(N−1) + 1 + e] / 2   (mod e)
- *    Then: (kp − A)² ≡ A² + k       (mod e)
- *
- *  So B = A² + k mod e, and we need √B mod e.
- *  Then kp = √B + A mod e,  kq = −√B + A mod e.
- * ======================================================================== */
 
-/* ========================================================================
- * Step 3b: Solve quadratic for kp, kq
- *
- * Equation: kp² − [k(N−1)+1]·kp − k ≡ 0 (mod e)
- *
- * Complete the square:
- * Let A = [k(N−1) + 1 + e] / 2   (mod e)
- * Then: (kp − A)² ≡ A² + k       (mod e)
- *
- * So B = A² + k mod e, and we need √B mod e.
- * Then kp = √B + A mod e,  kq = −√B + A mod e.
- * ======================================================================== */
-
+// on choppe kp et kq en resolvant l'eq du second degré
 int solve_kp_kq(const mpz_t N, const mpz_t e, const mpz_t k,
                 mpz_t kp, mpz_t kq)
 {
     mpz_t A, B, sqrt1, sqrt2;
     mpz_inits(A, B, sqrt1, sqrt2, NULL);
 
-    /* A = [k·(N−1) + 1 + e] / 2  mod e */
-    mpz_sub_ui(A, N, 1);       /* A = N − 1          */
-    mpz_mul(A, A, k);          /* A = k·(N−1)        */
-    mpz_add_ui(A, A, 1);       /* A = k·(N−1) + 1    */
+    // A = [k(N-1) + 1 + e] / 2
+    mpz_sub_ui(A, N, 1);
+    mpz_mul(A, A, k);
+    mpz_add_ui(A, A, 1);
 
-    /* FIX: Make A even before exact division by 2 */
-    /* Since e is odd, adding e to an odd A makes it even. */
+    // FIX astuce: e est tjs impair, donc on l'ajoute pour rendre A pair avant la div
     if (mpz_odd_p(A)) {
         mpz_add(A, A, e);
     }
 
-    mpz_divexact_ui(A, A, 2);  /* A = [...] / 2      */
-    mpz_mod(A, A, e);          /* A = A mod e        */
+    mpz_divexact_ui(A, A, 2);
+    mpz_mod(A, A, e);
 
-    /* B = A² + k  mod e */
+    // B = A^2 + k
     mpz_mul(B, A, A);
     mpz_add(B, B, k);
     mpz_mod(B, B, e);
 
-    /* Solve: x² ≡ B (mod e) using Tonelli-Shanks */
+    // on recup les racines via tonelli shanks
     if (tonelli_shanks(B, e, sqrt1, sqrt2) != 0) {
-        fprintf(stderr, "[INIT] ERROR: No solution for kp/kq quadratic equation\n");
+        fprintf(stderr, "[INIT] oups: pas de soluce pour l'eq de kp/kq\n");
         mpz_clears(A, B, sqrt1, sqrt2, NULL);
         return -1;
     }
 
-    /* kp = sqrt + A mod e,  kq = −sqrt + A mod e */
+    // kp = sqrt + A mod e (et kq c'est l'autre rep)
     mpz_add(kp, sqrt1, A);
     mpz_mod(kp, kp, e);
 
@@ -329,44 +259,31 @@ int solve_kp_kq(const mpz_t N, const mpz_t e, const mpz_t k,
     return 0;
 }
 
-/* ========================================================================
- *  Step 4: Correct LSBs of d, dp, dq
- *
- *  The lowest bits of d, dp, dq are deterministic:
- *    d  mod 2^(τ(k)+2)  = e⁻¹ mod 2^(τ(k)+2)
- *    dp mod 2^(τ(kp)+1) = e⁻¹ mod 2^(τ(kp)+1)
- *    dq mod 2^(τ(kq)+1) = e⁻¹ mod 2^(τ(kq)+1)
- *
- *  This is because:
- *    ed ≡ 1 (mod 2^(τ(k)+2))     [since k = 2^τ(k) · k' with k' odd]
- *    e·dp ≡ 1 (mod 2^(τ(kp)+1))  [similarly]
- * ======================================================================== */
 
+// fix des bits LSB. c'est deterministe pcq ed = 1 mod ...
 void correct_lsb(mpz_t out, const mpz_t e, const mpz_t k_val,
                  int tau_val, bool is_d)
 {
     mpz_t modulus;
     mpz_init(modulus);
 
-    /* For d: power = τ(k) + 2,  for dp/dq: power = τ(kx) + 1 */
+    // decallage diff pour d par rapport a dp/dq
     int power = is_d ? (tau_val + 2) : (tau_val + 1);
 
     mpz_ui_pow_ui(modulus, 2, (unsigned long)power);
-    mpz_invert(out, e, modulus);
+    mpz_invert(out, e, modulus); // e^-1 mod 2^power
 
     mpz_clear(modulus);
 }
 
-/* ========================================================================
- *  Verification (requires original key — for testing only)
- * ======================================================================== */
 
+// Fct de debug pour verif si on a bon en trichant avec la clef d'origine
 bool verify_init_result(const rsa_key_t *original, const init_result_t *result) {
     bool ok = true;
     mpz_t tmp, phi, p1, q1;
     mpz_inits(tmp, phi, p1, q1, NULL);
 
-    /* Compute expected k: k = (ed - 1) / φ(N) */
+    // verif k
     mpz_sub_ui(p1, original->p, 1);
     mpz_sub_ui(q1, original->q, 1);
     mpz_mul(phi, p1, q1);
@@ -376,47 +293,41 @@ bool verify_init_result(const rsa_key_t *original, const init_result_t *result) 
     mpz_divexact(tmp, tmp, phi);
 
     if (mpz_cmp(tmp, result->k) != 0) {
-        gmp_printf("[VERIFY] FAIL: k mismatch. Expected %Zd, got %Zd\n",
-                   tmp, result->k);
+        gmp_printf("[VERIFY] pb sur k. attendu: %Zd, eu: %Zd\n", tmp, result->k);
         ok = false;
     } else {
-        printf("[VERIFY] k: OK\n");
+        printf("[VERIFY] k: ok\n");
     }
 
-    /* Compute expected kp: kp = (e·dp - 1) / (p - 1) */
+    // verif kp
     mpz_mul(tmp, original->e, original->dp);
     mpz_sub_ui(tmp, tmp, 1);
     mpz_divexact(tmp, tmp, p1);
 
-    /* kp and kq might be swapped — check both assignments */
+    // kp et kq peuvent etre inversés, c normal
     if (mpz_cmp(tmp, result->kp) == 0) {
-        printf("[VERIFY] kp: OK\n");
+        printf("[VERIFY] kp: ok\n");
     } else if (mpz_cmp(tmp, result->kq) == 0) {
-        printf("[VERIFY] kp: OK (swapped with kq)\n");
+        printf("[VERIFY] kp: ok (mais inversé avec kq)\n");
     } else {
-        gmp_printf("[VERIFY] FAIL: kp mismatch. Expected %Zd, got kp=%Zd kq=%Zd\n",
-                   tmp, result->kp, result->kq);
         ok = false;
     }
 
-    /* Compute expected kq: kq = (e·dq - 1) / (q - 1) */
+    // pareil pour kq
     mpz_mul(tmp, original->e, original->dq);
     mpz_sub_ui(tmp, tmp, 1);
     mpz_divexact(tmp, tmp, q1);
 
     if (mpz_cmp(tmp, result->kp) == 0 || mpz_cmp(tmp, result->kq) == 0) {
-        printf("[VERIFY] kq: OK\n");
+        printf("[VERIFY] kq: ok\n");
     } else {
-        gmp_printf("[VERIFY] FAIL: kq mismatch. Expected %Zd, got kp=%Zd kq=%Zd\n",
-                   tmp, result->kp, result->kq);
         ok = false;
     }
 
-    /* Verify τ values */
+    // check rapide des tau()
     int expected_tau_k = tau(result->k);
     if (result->tau_k != expected_tau_k) {
-        printf("[VERIFY] FAIL: τ(k) = %d, expected %d\n",
-               result->tau_k, expected_tau_k);
+        printf("[VERIFY] nope: τ(k) = %d au lieu de %d\n", result->tau_k, expected_tau_k);
         ok = false;
     }
 
@@ -424,18 +335,16 @@ bool verify_init_result(const rsa_key_t *original, const init_result_t *result) 
     return ok;
 }
 
-/* ========================================================================
- *  Main entry point: run full init phase
- * ======================================================================== */
 
+// MAIN de la phase d'init. c'est ça qu'on appelle depuis le prg principal
 int run_init_phase(const degraded_key_t *dk, init_result_t *result, bool verbose) {
 
     printf("╔══════════════════════════════════════╗\n");
-    printf("║   Init Phase: Computing k, kp, kq    ║\n");
+    printf("║   Init Phase: recup de k, kp, kq     ║\n");
     printf("╚══════════════════════════════════════╝\n\n");
 
-    /* ---- Step 1: Find k ---- */
-    printf("[INIT] Step 1/4: Finding k from degraded d ...\n");
+    // -- Etape 1 --
+    printf("[INIT] Etape 1/4: recup k...\n");
 
     mpz_t d_tilde;
     mpz_init(d_tilde);
@@ -444,68 +353,50 @@ int run_init_phase(const degraded_key_t *dk, init_result_t *result, bool verbose
                              result->k, d_tilde, verbose);
 
     if (match_count == 0) {
-        fprintf(stderr, "[INIT] ERROR: Could not find k (no MSB matches)\n");
+        fprintf(stderr, "[INIT] erreur critique: impossible de trouver k\n");
         mpz_clear(d_tilde);
         return -1;
     }
+    gmp_printf("[INIT] k = %Zd\n\n", result->k);
 
-    gmp_printf("[INIT] Found k = %Zd  (%d MSBs matched)\n\n", result->k, match_count);
-
-    /* ---- Step 2: Correct MSB half of d ---- */
-    printf("[INIT] Step 2/4: Correcting MSB half of d ...\n");
+    // -- Etape 2 --
+    printf("[INIT] Etape 2/4: fix des MSB de d...\n");
 
     correct_d_msb(d_tilde, dk->key.d, result->d_msb_corrected, dk->full_bits);
-
-    if (verbose) {
-        gmp_printf("[INIT] d̃(k)           = %Zd\n", d_tilde);
-        gmp_printf("[INIT] d_msb_corrected = %Zd\n", result->d_msb_corrected);
-    }
-    printf("[INIT] MSB correction done\n\n");
-
+    printf("[INIT] MSB fixés\n\n");
     mpz_clear(d_tilde);
 
-    /* ---- Step 3: Solve for kp, kq ---- */
-    printf("[INIT] Step 3/4: Solving quadratic for kp, kq ...\n");
+    // -- Etape 3 --
+    printf("[INIT] Etape 3/4: resolution de l'eq pour kp et kq...\n");
 
     if (solve_kp_kq(dk->key.N, dk->key.e, result->k,
                     result->kp, result->kq) != 0) {
-        fprintf(stderr, "[INIT] ERROR: Failed to solve for kp/kq\n");
+        fprintf(stderr, "[INIT] crash sur la resolution kp/kq\n");
         return -1;
     }
-
     gmp_printf("[INIT] kp = %Zd\n", result->kp);
     gmp_printf("[INIT] kq = %Zd\n\n", result->kq);
 
-    /* ---- Step 4: Compute τ values and correct LSBs ---- */
-    printf("[INIT] Step 4/4: Computing τ values, correcting LSBs ...\n");
+    // -- Etape 4 --
+    printf("[INIT] Etape 4/4: calcul des tau et LSB...\n");
 
     result->tau_k  = tau(result->k);
     result->tau_kp = tau(result->kp);
     result->tau_kq = tau(result->kq);
 
-    printf("[INIT] τ(k)=%d, τ(kp)=%d, τ(kq)=%d\n",
-           result->tau_k, result->tau_kp, result->tau_kq);
-
-    /* Initialize p0, q0 with known bit 0 (primes are odd) */
+    // on set p[0] et q[0] à 1 (un nombre premier est tjs impair)
     mpz_set_ui(result->p0, 0);
     mpz_set_ui(result->q0, 0);
-    mpz_setbit(result->p0, 0);  /* p[0] = 1 */
-    mpz_setbit(result->q0, 0);  /* q[0] = 1 */
+    mpz_setbit(result->p0, 0);
+    mpz_setbit(result->q0, 0);
 
-    /* Correct LSBs of d, dp, dq */
+    // fix deterministe des lsb
     correct_lsb(result->d0,  dk->key.e, result->k,  result->tau_k,  true);
     correct_lsb(result->dp0, dk->key.e, result->kp, result->tau_kp, false);
     correct_lsb(result->dq0, dk->key.e, result->kq, result->tau_kq, false);
 
-    if (verbose) {
-        printf("[INIT] LSB corrections:\n");
-        gmp_printf("  d0  = %Zd  (mod 2^%d)\n", result->d0, result->tau_k + 2);
-        gmp_printf("  dp0 = %Zd  (mod 2^%d)\n", result->dp0, result->tau_kp + 1);
-        gmp_printf("  dq0 = %Zd  (mod 2^%d)\n", result->dq0, result->tau_kq + 1);
-    }
-
     result->valid = true;
-    printf("\n[INIT] Initialization complete.\n");
+    printf("\n[INIT] c'est good l'init est fini.\n");
 
     if (verbose) {
         init_result_print(result);
