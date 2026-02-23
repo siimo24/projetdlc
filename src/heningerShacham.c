@@ -447,6 +447,7 @@ static int hs_run_once(const degraded_key_t *dk,
             mpz_set(result->recovered_key.N, dk->key.N);
             mpz_set(result->recovered_key.e, dk->key.e);
 
+            // Reconstruit la fin des données CRT
             mpz_t p1, q1, phi;
             mpz_inits(p1, q1, phi, NULL);
             mpz_sub_ui(p1, fp, 1);
