@@ -1,9 +1,11 @@
 #include "henecka_may.h"
 #include <time.h>
 
+// ==========================================================
+// Gestion de la liste des candidats
+// ==========================================================
 
-// struct d'un candidat donné
-
+// structure d'un candidat partiel
 typedef struct {
     mpz_t p, q, d, dp, dq;
 } hmm_candidate_t;
@@ -24,7 +26,7 @@ static void candidate_copy(hmm_candidate_t *dst, const hmm_candidate_t *src) {
     mpz_set(dst->dq, src->dq);
 }
 
-// liste dynamique de candidats + fct utilitaires
+// liste dynamique facon std::vector en C
 typedef struct {
     hmm_candidate_t *items;
     int count;
@@ -48,8 +50,7 @@ static void list_clear(candidate_list_t *l) {
     l->capacity = 0;
 }
 
-// si la liste est pleine on lui  double la taille avec realloc
-// c'est équivalent au std vector en cpp
+// si on a pu de place, on double la capa (opti classique)
 static void list_ensure(candidate_list_t *l, int needed) {
     if (needed <= l->capacity) return;
     int new_cap = l->capacity;
@@ -60,7 +61,6 @@ static void list_ensure(candidate_list_t *l, int needed) {
     l->capacity = new_cap;
 }
 
-// ajout d'un candidat
 static void list_push(candidate_list_t *l, const hmm_candidate_t *c) {
     list_ensure(l, l->count + 1);
     candidate_copy(&l->items[l->count], c);
@@ -68,11 +68,10 @@ static void list_push(candidate_list_t *l, const hmm_candidate_t *c) {
 }
 
 static void list_reset(candidate_list_t *l) {
-    l->count = 0;
+    l->count = 0; // effacement "logique" ultra rapide, on garde la RAM allouée
 }
 
-// liste statique qui permettra des comparaisons rapides
-
+// la table ultime des 32 combis de bits
 static const char POSSIBILITIES[32][5] = {
     {0,0,0,0,0}, {0,0,0,0,1}, {0,0,0,1,0}, {0,0,0,1,1},
     {0,0,1,0,0}, {0,0,1,0,1}, {0,0,1,1,0}, {0,0,1,1,1},
@@ -84,7 +83,9 @@ static const char POSSIBILITIES[32][5] = {
     {1,1,1,0,0}, {1,1,1,0,1}, {1,1,1,1,0}, {1,1,1,1,1}
 };
 
-/* ---- Equation checks (same as HS09) ---- */
+// ==========================================================
+// Filtres mathématiques (les fameuses equations 2-adiques)
+// ==========================================================
 
 static bool doesNEqualpq(const mpz_t N, const mpz_t p0, const mpz_t q0,
                       char p_i, char q_i, int i)
@@ -149,8 +150,11 @@ static bool eTimesdq(const mpz_t e, const mpz_t kq, int tau_kq,
     return ok;
 }
 
-/* ---- Termination check ---- */
+// ==========================================================
+// Core Algorithm
+// ==========================================================
 
+// test de victoire: on derive p et q direct avec l'algebre pour voir si ca passe
 static bool verify_success(const mpz_t e, const mpz_t kp, const mpz_t kq,
                             const mpz_t N, const mpz_t dp0, const mpz_t dq0,
                             mpz_t out_p, mpz_t out_q)
@@ -188,25 +192,16 @@ static bool verify_success(const mpz_t e, const mpz_t kp, const mpz_t kq,
     return found;
 }
 
-/* ---- Parameters ---- */
-
 void hmm_params_default(hmm_params_t *params) {
-    params->block_size_t = 0;       /* Auto */
-    params->threshold_C = 0;        /* Auto */
+    params->block_size_t = 0;
+    params->threshold_C = 0;
     params->max_candidates = 100000;
     params->target_delta = 0.20;
 }
 
-/*
- * Auto-compute parameters from the paper:
- *   t ≈ ⌈10 · ln(2) / ε²⌉  where ε = 1/2 − δ   (simplified from paper)
- *   γ₀ = √((1 + 1/t) · ln(2) / 10)
- *   C = ⌊5t · (1/2 + γ₀)⌋
- *
- * The factor 5 comes from 5 components per slice.
- */
+// calcul auto des params selon l'equa de Hoeffding dans HMM10
 void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
-    (void)key_bits;  /* Not needed for current formula, but kept for flexibility */
+    (void)key_bits;
 
     double delta = error_rate;
     if (delta <= 0.0) delta = 0.01;
@@ -214,19 +209,18 @@ void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
 
     double epsilon = 0.5 - delta;
 
-    // bloc de taille t
+    // fix taille de bloc
     if (params->block_size_t <= 0) {
         double t_float = 10.0 * log(2.0) / (epsilon * epsilon);
         params->block_size_t = (int)ceil(t_float);
 
-        /* Clamp to practical range */
         if (params->block_size_t < 5)  params->block_size_t = 5;
         if (params->block_size_t > 15) params->block_size_t = 15;
     }
 
     int t = params->block_size_t;
 
-    // seuil C basé sur la formule de HMM10
+    // fix seuil C de tolérence
     if (params->threshold_C <= 0) {
         double gamma_0 = sqrt((1.0 + 1.0 / t) * log(2.0) / 10.0);
         params->threshold_C = (int)floor(5.0 * t * (0.5 + gamma_0));
@@ -234,10 +228,6 @@ void hmm_params_auto(hmm_params_t *params, int key_bits, double error_rate) {
 
     params->target_delta = delta;
 }
-
-
-
-// rien de fou là en bas juste des focntion utilitaires
 
 void hmm_params_print(const hmm_params_t *params) {
     printf("=== HMM Parameters ===\n");
@@ -247,7 +237,6 @@ void hmm_params_print(const hmm_params_t *params) {
     printf("  Max candidates:    %d\n", params->max_candidates);
     printf("  Target δ:          %.4f\n", params->target_delta);
 
-    /* Show expected match counts */
     int t = params->block_size_t;
     printf("  Expected correct:  ~%.1f / %d matches\n",
            5.0 * t * (1.0 - params->target_delta), 5 * t);
@@ -286,20 +275,9 @@ void hmm_result_print(const hmm_result_t *res) {
     printf("==================================\n");
 }
 
-/* ========================================================================
- *  Block expansion: depth-first recursive expansion within a t-bit block.
- *
- *  For each bit position, we try all valid slices (from equations 8-11).
- *  For each valid slice, we count how many of its 5 bits match the
- *  degraded key bits at the corresponding positions. This match count
- *  is accumulated. At the end of the block (depth == t), we check if
- *  match_count >= C. If so, the candidate is added to the output list.
- *
- *  This avoids materializing all 2^t leaves — only survivors are stored.
- * ======================================================================== */
 
+// context global pdt la fouille de l'arbre
 typedef struct {
-    /* Constants */
     const mpz_t *N;
     const mpz_t *e;
     const mpz_t *k;
@@ -308,47 +286,40 @@ typedef struct {
     int tau_k, tau_kp, tau_kq;
     int half_bits;
 
-    /* Degraded key bit values (for matching) */
     const mpz_t *deg_p;
     const mpz_t *deg_q;
     const mpz_t *deg_d;
     const mpz_t *deg_dp;
     const mpz_t *deg_dq;
 
-    /* Block parameters */
-    int block_start;    /* Global bit index where this block starts */
-    int block_size;     /* t */
-    int threshold;      /* C */
+    int block_start;
+    int block_size;
+    int threshold;
 
-    /* Output */
     candidate_list_t *output;
     int max_candidates;
-
-    /* Stats */
     long long *candidates_generated;
 } hmm_expand_ctx_t;
 
+// fct recusive qui fouille toutes les combis possible pour un bloc donné
 static void process_block_of_bits(
     hmm_expand_ctx_t *ctx,
     mpz_t cur_p, mpz_t cur_q, mpz_t cur_d, mpz_t cur_dp, mpz_t cur_dq,
     int depth_in_block,
     int match_count)
 {
-    /* NEW: Prevent massive CPU hang if kp/kq are swapped and the tree explodes.
-     * If we generate way too many candidates in a single block, it means our
-     * equations are not pruning properly (which happens when kp/kq are wrong). */
+    // crash prev : si l'arbre explose (mauvais kp/kq), on tej pour pas freeze le CPU
     if (*ctx->candidates_generated > ctx->max_candidates * 10) {
         return;
     }
 
     int global_pos = ctx->block_start + depth_in_block;
 
-    /* ---- Block boundary: threshold check ---- */
+    // fin du bloc t : c'est l'heure du couperet, on check le seuil C
     if (depth_in_block == ctx->block_size) {
         (*ctx->candidates_generated)++;
 
         if (match_count >= ctx->threshold) {
-            /* Survivor — add to output if under limit */
             if (ctx->output->count < ctx->max_candidates) {
                 hmm_candidate_t cand;
                 candidate_init(&cand);
@@ -364,13 +335,10 @@ static void process_block_of_bits(
         return;
     }
 
-    /* ---- Past the half-bit boundary: stop expanding ---- */
+    // si on deborde de la moitie de N, on stop
     if (global_pos >= ctx->half_bits) {
-        /* Treat as end of block — check threshold with what we have */
         (*ctx->candidates_generated)++;
-        if (match_count >= ctx->threshold ||
-            depth_in_block < ctx->block_size / 2)  /* lenient at key end */
-        {
+        if (match_count >= ctx->threshold || depth_in_block < ctx->block_size / 2) {
             if (ctx->output->count < ctx->max_candidates) {
                 hmm_candidate_t cand;
                 candidate_init(&cand);
@@ -386,14 +354,18 @@ static void process_block_of_bits(
         return;
     }
 
-    /* ---- Early termination: even with max remaining matches, can't reach C ---- */
+    // elagage prematuré : meme si TOUS les prochains bits sont parfaits, on atteindra pas C
     int remaining_bits = ctx->block_size - depth_in_block;
     int max_possible = match_count + 5 * remaining_bits;
     if (max_possible < ctx->threshold) {
-        return;  /* Prune: impossible to reach threshold */
+        return; // rip le candidat
     }
 
-    /* ---- Try all 32 slice candidates ---- */
+    // OPTI MAJEURE : On declare et init les vars ici EN DEHORS du for.
+    // Avant, elles etaient dans la boucle, ca faisait 2.5 millions de malloc/free par bloc !
+    mpz_t cl_p, cl_q, cl_d, cl_dp, cl_dq;
+    mpz_inits(cl_p, cl_q, cl_d, cl_dp, cl_dq, NULL);
+
     for (int s = 0; s < 32; s++) {
         char p_i  = POSSIBILITIES[s][0];
         char q_i  = POSSIBILITIES[s][1];
@@ -401,74 +373,64 @@ static void process_block_of_bits(
         char dp_i = POSSIBILITIES[s][3];
         char dq_i = POSSIBILITIES[s][4];
 
-        /* Check equations (8)-(11) */
-        if (!doesNEqualpq(*ctx->N, cur_p, cur_q, p_i, q_i, global_pos))
-            continue;
-        if (!eTimesd(*ctx->N, *ctx->e, *ctx->k, ctx->tau_k,
-                       cur_p, cur_q, cur_d, p_i, q_i, d_i, global_pos))
-            continue;
-        if (!eTimesdp(*ctx->e, *ctx->kp, ctx->tau_kp,
-                        cur_p, cur_dp, p_i, dp_i, global_pos))
-            continue;
-        if (!eTimesdq(*ctx->e, *ctx->kq, ctx->tau_kq,
-                        cur_q, cur_dq, q_i, dq_i, global_pos))
-            continue;
+        // filtres mathématiques violents
+        if (!doesNEqualpq(*ctx->N, cur_p, cur_q, p_i, q_i, global_pos)) continue;
+        if (!eTimesd(*ctx->N, *ctx->e, *ctx->k, ctx->tau_k, cur_p, cur_q, cur_d, p_i, q_i, d_i, global_pos)) continue;
+        if (!eTimesdp(*ctx->e, *ctx->kp, ctx->tau_kp, cur_p, cur_dp, p_i, dp_i, global_pos)) continue;
+        if (!eTimesdq(*ctx->e, *ctx->kq, ctx->tau_kq, cur_q, cur_dq, q_i, dq_i, global_pos)) continue;
 
-        /* Count matches with degraded key */
+        // le chemin est legit niveau maths, on le note contre la RAM petee (erreur tolerée)
         int new_matches = match_count;
 
-        if (p_i == get_bit(*ctx->deg_p, global_pos))
-            new_matches++;
-        if (q_i == get_bit(*ctx->deg_q, global_pos))
-            new_matches++;
+        if (p_i == get_bit(*ctx->deg_p, global_pos)) new_matches++;
+        if (q_i == get_bit(*ctx->deg_q, global_pos)) new_matches++;
 
         int d_pos = global_pos + ctx->tau_k;
         if (d_pos < ctx->half_bits * 2) {
-            if (d_i == get_bit(*ctx->deg_d, d_pos))
-                new_matches++;
+            if (d_i == get_bit(*ctx->deg_d, d_pos)) new_matches++;
         }
 
         int dp_pos = global_pos + ctx->tau_kp;
         if (dp_pos < ctx->half_bits) {
-            if (dp_i == get_bit(*ctx->deg_dp, dp_pos))
-                new_matches++;
+            if (dp_i == get_bit(*ctx->deg_dp, dp_pos)) new_matches++;
         }
 
         int dq_pos = global_pos + ctx->tau_kq;
         if (dq_pos < ctx->half_bits) {
-            if (dq_i == get_bit(*ctx->deg_dq, dq_pos))
-                new_matches++;
+            if (dq_i == get_bit(*ctx->deg_dq, dq_pos)) new_matches++;
         }
 
-        /* Clone, set bits, and recurse */
-        mpz_t cl_p, cl_q, cl_d, cl_dp, cl_dq;
-        mpz_init_set(cl_p,  cur_p);
-        mpz_init_set(cl_q,  cur_q);
-        mpz_init_set(cl_d,  cur_d);
-        mpz_init_set(cl_dp, cur_dp);
-        mpz_init_set(cl_dq, cur_dq);
+        // MAJ de l'etat des vars locales, on ecrase les valeurs par celles du parent
+        mpz_set(cl_p,  cur_p);
+        mpz_set(cl_q,  cur_q);
+        mpz_set(cl_d,  cur_d);
+        mpz_set(cl_dp, cur_dp);
+        mpz_set(cl_dq, cur_dq);
 
-        if (p_i)  mpz_setbit(cl_p,  global_pos);
-        if (q_i)  mpz_setbit(cl_q,  global_pos);
-        if (d_i)  mpz_setbit(cl_d,  global_pos + ctx->tau_k);
-        if (dp_i) mpz_setbit(cl_dp, global_pos + ctx->tau_kp);
-        if (dq_i) mpz_setbit(cl_dq, global_pos + ctx->tau_kq);
+        // FIX "Ghost Bit" : On set à 1, mais on force AUSSI à 0.
+        // Sans le clrbit, des bits résiduels pouvaient corrompre les calculs 2-adiques
+        if (p_i)  mpz_setbit(cl_p,  global_pos); else mpz_clrbit(cl_p, global_pos);
+        if (q_i)  mpz_setbit(cl_q,  global_pos); else mpz_clrbit(cl_q, global_pos);
+        if (d_i)  mpz_setbit(cl_d,  global_pos + ctx->tau_k); else mpz_clrbit(cl_d, global_pos + ctx->tau_k);
+        if (dp_i) mpz_setbit(cl_dp, global_pos + ctx->tau_kp); else mpz_clrbit(cl_dp, global_pos + ctx->tau_kp);
+        if (dq_i) mpz_setbit(cl_dq, global_pos + ctx->tau_kq); else mpz_clrbit(cl_dq, global_pos + ctx->tau_kq);
 
+        // On s'enfonce plus profond
         process_block_of_bits(ctx, cl_p, cl_q, cl_d, cl_dp, cl_dq,
                                depth_in_block + 1, new_matches);
 
-        mpz_clears(cl_p, cl_q, cl_d, cl_dp, cl_dq, NULL);
-
-        /* Early exit if output is full */
-        /* Early exit if output is full or safety limit reached */
+        // check de securite : on break au lieu de return pour bien free la RAM a la fin
         if (ctx->output->count >= ctx->max_candidates ||
             *ctx->candidates_generated > ctx->max_candidates * 10) {
-            return;
+            break;
         }
     }
+
+    // menage, on nettoie TOUT le block d'un coup
+    mpz_clears(cl_p, cl_q, cl_d, cl_dp, cl_dq, NULL);
 }
 
-
+// --- Moteur principal HMM10 ---
 
 static int main_hmm_function(const degraded_key_t *dk,
                         const mpz_t k, const mpz_t kp, const mpz_t kq,
@@ -482,13 +444,11 @@ static int main_hmm_function(const degraded_key_t *dk,
     int C = params->threshold_C;
     int num_blocks = (half_bits + t - 1) / t;
 
-    // initialisation du premier candidat
     candidate_list_t current, next;
     list_init(&current, 16);
     list_init(&next, 64);
 
-
-    // le candidat initial a p[0]=1, q[0]=1
+    // root: p et q sont tjs impairs
     hmm_candidate_t start;
     candidate_init(&start);
     mpz_set_ui(start.p, 0);
@@ -496,6 +456,7 @@ static int main_hmm_function(const degraded_key_t *dk,
     mpz_setbit(start.p, 0);
     mpz_setbit(start.q, 0);
 
+    // correction lsb
     mpz_t modulus;
     mpz_init(modulus);
     mpz_ui_pow_ui(modulus, 2, (unsigned long)(tau_k + 2));
@@ -514,15 +475,15 @@ static int main_hmm_function(const degraded_key_t *dk,
                num_blocks, t, C, half_bits);
     }
 
-    // traitement des blocs
+    // on decoupe la clef en tranche et on avance par blocs
     for (int block = 0; block < num_blocks; block++) {
-        int block_start = 1 + block * t;  /* bit 0 already set */
+        int block_start = 1 + block * t;
 
         if (block_start >= half_bits) break;
 
         list_reset(&next);
 
-        // on verfie le succes pour chaque candiat avant de poursuivre
+        // check precoce de victoire pour tous les mecs en lice
         mpz_t cand_p, cand_q;
         mpz_inits(cand_p, cand_q, NULL);
 
@@ -531,7 +492,7 @@ static int main_hmm_function(const degraded_key_t *dk,
                                 current.items[c].dp, current.items[c].dq,
                                 cand_p, cand_q))
             {
-                // réussi
+                // BINGO !
                 result->success = true;
                 mpz_set(result->recovered_key.p, cand_p);
                 mpz_set(result->recovered_key.q, cand_q);
@@ -553,19 +514,20 @@ static int main_hmm_function(const degraded_key_t *dk,
                 mpz_clears(cand_p, cand_q, NULL);
                 list_clear(&current);
                 list_clear(&next);
+
+                if (!verbose) printf("\n"); // clean l'affichage
                 return 0;
             }
         }
         mpz_clears(cand_p, cand_q, NULL);
 
-        // expansion d'un candidat
         long long block_generated = 0;
 
         hmm_expand_ctx_t ctx;
         ctx.N = &dk->key.N;
         ctx.e = &dk->key.e;
 
-        // fix ici sur les pointeurs qui donnaient un seg fault
+        // fix crade mais obligatoire pour passer les mpz_t sans segfault
         ctx.k = (const mpz_t *)k;
         ctx.kp = (const mpz_t *)kp;
         ctx.kq = (const mpz_t *)kq;
@@ -582,7 +544,7 @@ static int main_hmm_function(const degraded_key_t *dk,
         ctx.block_start = block_start;
         ctx.block_size = t;
 
-        // si le dernier bloc est plus court on ajuste le seuil
+        // petit ajustement du seuil si on coupe court sur le dernier bloc
         int effective_t = t;
         if (block_start + t > half_bits)
             effective_t = half_bits - block_start;
@@ -607,31 +569,34 @@ static int main_hmm_function(const degraded_key_t *dk,
         if (next.count > result->max_candidates_at_once)
             result->max_candidates_at_once = next.count;
 
+        // feedback visuel pour savoir que ca avance
         if (verbose) {
             printf("  [HMM] Block %d/%d (bits %d-%d): %d candidates → %d survivors"
                    " (%lld generated)\n",
                    block + 1, num_blocks, block_start,
                    block_start + effective_t - 1,
                    current.count, next.count, block_generated);
+        } else {
+            // ptite anim de points pour pas faire croire au user que c'est freezé
+            printf(".");
+            fflush(stdout);
         }
 
-        // aucun survivant, l'algo a échoué
         if (next.count == 0) {
-            if (verbose)
-                printf("  [HMM] No candidates survived! Aborting.\n");
+            if (verbose) printf("  [HMM] Game over, tous les candidats sont morts.\n");
+            else printf("\n");
             list_clear(&current);
             list_clear(&next);
             return -1;
         }
 
-        // swap le courant et le next
         candidate_list_t tmp = current;
         current = next;
         next = tmp;
         list_reset(&next);
     }
 
-    // verification de succès sur les candidats restants
+    // si ca tient jusque la, ultime check sur les survivants
     mpz_t final_p, final_q;
     mpz_inits(final_p, final_q, NULL);
 
@@ -665,10 +630,13 @@ static int main_hmm_function(const degraded_key_t *dk,
     list_clear(&current);
     list_clear(&next);
 
+    if (!verbose) printf("\n");
     return result->success ? 0 : -1;
 }
 
-// fct exposée au main
+// ==========================================================
+// Wrapper public (appelé par main.c)
+// ==========================================================
 
 int run_henecka_may(const degraded_key_t *dk,
                     const init_result_t *init,
@@ -687,10 +655,8 @@ int run_henecka_may(const degraded_key_t *dk,
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    // on calcule avec kp et kq tels qu'ils ont étés donnés
     gmp_printf("[HMM] Attempt 1: kp=%Zd, kq=%Zd\n", init->kp, init->kq);
-    printf("[HMM] τ(k)=%d, τ(kp)=%d, τ(kq)=%d\n\n",
-           init->tau_k, init->tau_kp, init->tau_kq);
+    printf("[HMM] τ(k)=%d, τ(kp)=%d, τ(kq)=%d\n", init->tau_k, init->tau_kp, init->tau_kq);
 
     int ret = main_hmm_function(dk, init->k, init->kp, init->kq,
                            init->tau_k, init->tau_kp, init->tau_kq,
@@ -698,20 +664,18 @@ int run_henecka_may(const degraded_key_t *dk,
 
     if (ret == 0) {
         clock_gettime(CLOCK_MONOTONIC, &end);
-        result->elapsed_seconds = (end.tv_sec - start.tv_sec)
-                                + (end.tv_nsec - start.tv_nsec) / 1e9;
-        printf("\n[HMM] SUCCESS on attempt 1!\n");
+        result->elapsed_seconds = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+        printf("[HMM] SUCCESS on attempt 1!\n");
         hmm_result_print(result);
         return 0;
     }
 
-    // possible que kp et kq aient été confondus lors de l'exploration donc on les swap
+    // si ca a fail, on part du principe que kp et kq ont ete lock sur le mauvais prime
     if (try_swap) {
-        printf("\n[HMM] Attempt 1 failed. Retrying with swapped kp/kq ...\n");
+        printf("[HMM] Attempt 1 failed. Retrying with swapped kp/kq ...\n");
 
         int tau_kp_swap = tau(init->kq);
         int tau_kq_swap = tau(init->kp);
-
 
         long long prev_gen = result->total_candidates_generated;
         long long prev_pruned = result->total_candidates_pruned;
@@ -732,19 +696,17 @@ int run_henecka_may(const degraded_key_t *dk,
 
         if (ret == 0) {
             clock_gettime(CLOCK_MONOTONIC, &end);
-            result->elapsed_seconds = (end.tv_sec - start.tv_sec)
-                                    + (end.tv_nsec - start.tv_nsec) / 1e9;
-            printf("\n[HMM] SUCCESS on attempt 2 (swapped kp/kq)!\n");
+            result->elapsed_seconds = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+            printf("[HMM] SUCCESS on attempt 2 (swapped kp/kq)!\n");
             hmm_result_print(result);
             return 0;
         }
     }
 
     clock_gettime(CLOCK_MONOTONIC, &end);
-    result->elapsed_seconds = (end.tv_sec - start.tv_sec)
-                            + (end.tv_nsec - start.tv_nsec) / 1e9;
+    result->elapsed_seconds = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
 
-    printf("\n[HMM] FAILED — key not recovered.\n");
+    printf("[HMM] FAILED — key not recovered.\n");
     printf("  Total candidates generated: %lld\n", result->total_candidates_generated);
     printf("  Time: %.3f s\n", result->elapsed_seconds);
     printf("  (Try reducing δ or adjusting block_size/threshold)\n");
